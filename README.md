@@ -2,42 +2,7 @@
 
 Automatically clean up git worktrees whose pull requests have been merged.
 
-## Features
-
-- 🔍 **Auto-Detection** — Scans all repositories under a directory and finds worktrees with merged PRs
-- 🗑️ **Safe Cleanup** — Removes worktrees and local branches only when the PR is confirmed merged on GitHub
-- 📝 **Dry Run** — Preview what would be removed without making any changes
-- 📋 **Structured Logging** — JSONL log file for programmatic analysis, human-readable text on stdout
-- ⏰ **Scheduled Execution** — Includes launchd (macOS) and systemd (Linux) configurations for daily runs
-
-## How It Works
-
-1. Scans all subdirectories under the target directory for Git repositories
-2. Lists worktrees for each repository via `git worktree list --porcelain`
-3. Checks each worktree's branch against GitHub using `gh pr list --state merged`
-4. If the PR has been merged:
-   - Runs `git worktree remove --force`
-   - Deletes the local branch with `git branch -D`
-   - Runs `git worktree prune`
-
-## What It Does
-
-- Scans repositories under the configured directory and inspects their worktrees
-- Considers only non-main worktrees for cleanup
-- Removes a worktree only when its branch has a merged GitHub pull request
-- Removes the local worktree with `git worktree remove --force`
-- Attempts to delete the corresponding local branch with `git branch -D`
-- Runs `git worktree prune` after successful removals in that repository
-- Supports `--dry-run` so you can preview removals before making changes
-
-## What It Does Not Do
-
-- Does not remove the main worktree
-- Does not remove worktrees whose PR is not merged
-- Does not remove detached HEAD worktrees
-- Does not delete remote branches on GitHub
-- Does not merge pull requests or change PR state
-- Does not guarantee local branch deletion; branch cleanup is best-effort after the worktree is removed
+Scans repositories under a directory, checks each worktree's branch via `gh pr list --state merged`, and removes worktrees (+ local branches) that are confirmed merged. Skips the main worktree, unmerged branches, and detached HEADs.
 
 ## Prerequisites
 
@@ -48,24 +13,18 @@ Automatically clean up git worktrees whose pull requests have been merged.
 
 ### Prebuilt Binary (Recommended)
 
-Download the latest binary for your platform from [GitHub Releases](https://github.com/yuto-ts/worktree-gc/releases) and place it in your `PATH`:
-
 ```sh
 # macOS (Apple Silicon)
-curl -L https://github.com/yuto-ts/worktree-gc/releases/latest/download/worktree-gc-aarch64-apple-darwin.tar.gz | tar xz
-sudo mv worktree-gc /usr/local/bin/
+curl -L https://github.com/yuto-ts/worktree-gc/releases/latest/download/worktree-gc-aarch64-apple-darwin.tar.gz | tar xz && sudo mv worktree-gc /usr/local/bin/
 
 # macOS (Intel)
-curl -L https://github.com/yuto-ts/worktree-gc/releases/latest/download/worktree-gc-x86_64-apple-darwin.tar.gz | tar xz
-sudo mv worktree-gc /usr/local/bin/
+curl -L https://github.com/yuto-ts/worktree-gc/releases/latest/download/worktree-gc-x86_64-apple-darwin.tar.gz | tar xz && sudo mv worktree-gc /usr/local/bin/
 
 # Linux (x86_64)
-curl -L https://github.com/yuto-ts/worktree-gc/releases/latest/download/worktree-gc-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo mv worktree-gc /usr/local/bin/
+curl -L https://github.com/yuto-ts/worktree-gc/releases/latest/download/worktree-gc-x86_64-unknown-linux-gnu.tar.gz | tar xz && sudo mv worktree-gc /usr/local/bin/
 
 # Linux (aarch64)
-curl -L https://github.com/yuto-ts/worktree-gc/releases/latest/download/worktree-gc-aarch64-unknown-linux-gnu.tar.gz | tar xz
-sudo mv worktree-gc /usr/local/bin/
+curl -L https://github.com/yuto-ts/worktree-gc/releases/latest/download/worktree-gc-aarch64-unknown-linux-gnu.tar.gz | tar xz && sudo mv worktree-gc /usr/local/bin/
 ```
 
 ### From Source
@@ -76,193 +35,50 @@ Requires [Rust toolchain](https://rustup.rs/).
 cargo install --git https://github.com/yuto-ts/worktree-gc
 ```
 
-Or clone and install locally:
-
-```sh
-git clone https://github.com/yuto-ts/worktree-gc.git
-cd worktree-gc
-cargo install --path .
-```
-
 ## Usage
 
-### Update
-
 ```sh
-# Check for and install the latest version
-worktree-gc update
+worktree-gc               # interactive menu
+worktree-gc run           # run cleanup
+worktree-gc run --dry-run # preview without removing
+worktree-gc run -d /path/to/repos
 
-# Check if a newer version is available (without installing)
+worktree-gc update        # update to latest release
 worktree-gc update --check
-```
 
-### Cleanup
+worktree-gc history       # show last 10 log records
+worktree-gc history --last all -a removed
 
-```sh
-# Open the interactive command menu
-worktree-gc
-
-# Show current runtime and schedule configuration
-worktree-gc config
-
-# Save the current work directory as the default
-worktree-gc config set -d /path/to/repos
-
-# Save the current log file as the default
-worktree-gc config set --log-file /path/to/gc.jsonl
-
-# Remove a saved runtime default
-worktree-gc config unset dir
-
-# Run cleanup directly
-worktree-gc run
-
-# Preview what would be removed (recommended for first run)
-worktree-gc run --dry-run
-
-# Specify a custom directory
-worktree-gc run --dir /path/to/repos
-
-# Verbose output
-worktree-gc run --verbose
-```
-
-When invoked with no arguments, `worktree-gc` opens an interactive navigation menu so you can choose **Run cleanup**, **Show config**, **Manage schedule**, or **Show history**. If you pass options such as `-d`, `--dry-run`, or `--verbose` without a subcommand, it runs cleanup directly instead of opening the menu.
-
-### Options
-
-| Option | Env Variable | Description |
-|---|---|---|
-| `-d, --dir <DIR>` | `WORKTREE_GC_DIR` | Directory to scan for git repositories (default: current working directory) |
-| `-n, --dry-run` | — | Show what would be removed without actually removing |
-| `-v, --verbose` | — | Enable verbose output |
-| `--log-file <PATH>` | `WORKTREE_GC_LOG` | JSONL log file path (default: `~/.local/share/worktree-gc/gc.jsonl`) |
-
-### Execution History
-
-View past runs from the JSONL log:
-
-```sh
-# Show recent history (last 10 records)
-worktree-gc history
-
-# Show more records
-worktree-gc history --last 50
-
-# Show all records
-worktree-gc history --last all
-
-# Filter by action type
-worktree-gc history -a removed    # only removals
-worktree-gc history -a summary    # only run summaries
-worktree-gc history -a error      # only errors
-
-# Filter by repository name (substring match)
-worktree-gc history -r mspf-auth
-```
-
-Example output:
-
-```
-  2026-04-17T09:00:01+09:00  🗑  REMOVED  CSA-MLT/mspf-auth  branch:feat/795  PR #42 https://github.com/...
-  2026-04-17T09:00:02+09:00  ⏭  SKIPPED  CSA-MLT/mspf-core  branch:develop  reason:not_merged
-  2026-04-17T09:00:03+09:00  📊 SUMMARY  repos:38  worktrees:36  removed:15  skipped:21  errors:0
-```
-
-## Scheduling
-
-Built-in commands to set up daily automatic execution. Supports **launchd** (macOS) and **systemd** (Linux).
-
-### Interactive Wizard (Recommended)
-
-Run `schedule` with no arguments to launch the interactive setup wizard:
-
-```sh
-worktree-gc schedule
-```
-
-The wizard guides you through the configuration with prompts:
-
-```
-  ⏰ worktree-gc scheduler
-     Platform: macos (launchd)
-
-  No schedule is currently configured.
-  This wizard will set up daily automatic cleanup of merged worktrees.
-
-? Set up daily automatic execution? Yes
-? Directory to scan: .
-? What time should it run? (HH:MM) 09:00
-
-  Summary:
-  Scan directory: .
-  Run daily at:   09:00
-  Scheduler:      launchd
-
-? Install? Yes
-✓ Schedule installed (launchd)
-```
-
-If a schedule is already installed, the wizard shows the current status and lets you update the time/directory or remove it.
-
-### Non-Interactive Commands
-
-```sh
-# Install daily schedule (defaults to 09:00)
-worktree-gc schedule install
-
-# Install with custom time
-worktree-gc schedule install --hour 12 --minute 30
-
-# Specify a custom scan directory
-worktree-gc schedule install --dir /path/to/repos
-
-# Show current runtime and schedule configuration
-worktree-gc config
-
-# Remove the schedule
+worktree-gc schedule      # interactive schedule wizard (launchd / systemd)
+worktree-gc schedule install --hour 9 --minute 0
 worktree-gc schedule uninstall
+
+worktree-gc config        # show effective config
+worktree-gc config set -d /path/to/repos
 ```
 
-`worktree-gc config` shows the effective runtime settings, including the current work directory from `-d/--dir`, the saved runtime defaults, and a schedule section focused on scheduler-specific details. Runtime setting precedence is: command-line option > environment variable > saved config > built-in default.
+**Options** (apply to all subcommands):
 
-The `install` command automatically:
-- Detects the current binary path and scan directory
-- Generates the appropriate config (launchd plist or systemd unit files)
-- Installs and activates the schedule
-- Creates the log directory at `~/.local/share/worktree-gc/`
+| Option | Env | Default |
+|---|---|---|
+| `-d, --dir` | `WORKTREE_GC_DIR` | current directory |
+| `-n, --dry-run` | — | false |
+| `-v, --verbose` | — | false |
+| `--log-file` | `WORKTREE_GC_LOG` | `~/.local/share/worktree-gc/gc.jsonl` |
 
 ## Logging
 
-When `--log-file` is specified, worktree-gc writes **JSONL** (one JSON object per line) for structured analysis. stdout remains human-readable text.
-
-```sh
-worktree-gc --log-file ~/.local/share/worktree-gc/gc.jsonl
-```
-
-Each line is one of four record types:
+Writes JSONL to `--log-file` (one record per event). Example:
 
 ```jsonl
-{"action":"removed","timestamp":"2026-04-16T09:00:01+09:00","repo":"CSA-MLT/mspf-auth","branch":"feat/795","worktree":"/home/user/prog/mspf-auth-feat-795","pr_number":42,"pr_url":"https://github.com/CSA-MLT/mspf-auth/pull/42"}
-{"action":"skipped","timestamp":"...","repo":"CSA-MLT/mspf-core","branch":"develop","worktree":"...","reason":"not_merged"}
-{"action":"error","timestamp":"...","repo":"CSA-MLT/mspf-iam","branch":"fix/dep","worktree":"...","error":"worktree remove failed"}
-{"action":"summary","timestamp":"...","scanned_repos":38,"scanned_worktrees":36,"removed_count":15,"skipped_count":21,"error_count":0,"dry_run":false}
+{"action":"removed","timestamp":"...","repo":"owner/repo","branch":"feat/123","pr_number":42,"pr_url":"..."}
+{"action":"skipped","timestamp":"...","repo":"owner/repo","branch":"develop","reason":"not_merged"}
+{"action":"summary","timestamp":"...","scanned_repos":5,"removed_count":2,"error_count":0,"dry_run":false}
 ```
 
-### Querying with jq
-
 ```sh
-# List all removed worktrees
 jq 'select(.action=="removed")' gc.jsonl
-
-# Count removals per repo
 jq -r 'select(.action=="removed") | .repo' gc.jsonl | sort | uniq -c | sort -rn
-
-# Show today's summary
-jq 'select(.action=="summary")' gc.jsonl | tail -1
-
-# List errors
-jq 'select(.action=="error")' gc.jsonl
 ```
 
 ## License
