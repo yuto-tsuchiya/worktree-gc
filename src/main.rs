@@ -12,6 +12,7 @@ use std::str::FromStr;
 use std::sync::Mutex;
 
 mod scheduler;
+mod update;
 
 /// Automatically clean up git worktrees whose pull requests have been merged.
 #[derive(Parser, Debug)]
@@ -62,6 +63,12 @@ enum Commands {
         /// Filter by repo (substring match)
         #[arg(short, long)]
         repo: Option<String>,
+    },
+    /// Update worktree-gc to the latest release from GitHub
+    Update {
+        /// Only check for a newer version without installing it
+        #[arg(long)]
+        check: bool,
     },
 }
 
@@ -816,6 +823,7 @@ fn execute_command(cli: &Cli, command: Commands, raw_args: &[OsString]) -> Resul
         Commands::History { last, action, repo } => {
             show_history(&cli.log_file, last, action.as_deref(), repo.as_deref())
         }
+        Commands::Update { check } => update::run(check),
         Commands::Run => run_gc(cli),
     }
 }

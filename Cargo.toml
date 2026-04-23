@@ -20,3 +20,4 @@ log = "0.4"
 dirs = "6"
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 console = "0.15"
+self_update = { version = "0.41", features = ["archive-tar", "compression-flate2"] }
