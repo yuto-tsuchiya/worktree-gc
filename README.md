@@ -43,11 +43,34 @@ Automatically clean up git worktrees whose pull requests have been merged.
 
 - [Git](https://git-scm.com/)
 - [GitHub CLI (`gh`)](https://cli.github.com/) — authenticated via `gh auth login`
-- [Rust toolchain](https://rustup.rs/) — for building from source
 
 ## Installation
 
+### Prebuilt Binary (Recommended)
+
+Download the latest binary for your platform from [GitHub Releases](https://github.com/yuto-ts/worktree-gc/releases) and place it in your `PATH`:
+
+```sh
+# macOS (Apple Silicon)
+curl -L https://github.com/yuto-ts/worktree-gc/releases/latest/download/worktree-gc-aarch64-apple-darwin.tar.gz | tar xz
+sudo mv worktree-gc /usr/local/bin/
+
+# macOS (Intel)
+curl -L https://github.com/yuto-ts/worktree-gc/releases/latest/download/worktree-gc-x86_64-apple-darwin.tar.gz | tar xz
+sudo mv worktree-gc /usr/local/bin/
+
+# Linux (x86_64)
+curl -L https://github.com/yuto-ts/worktree-gc/releases/latest/download/worktree-gc-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv worktree-gc /usr/local/bin/
+
+# Linux (aarch64)
+curl -L https://github.com/yuto-ts/worktree-gc/releases/latest/download/worktree-gc-aarch64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv worktree-gc /usr/local/bin/
+```
+
 ### From Source
+
+Requires [Rust toolchain](https://rustup.rs/).
 
 ```sh
 cargo install --git https://github.com/yuto-ts/worktree-gc
@@ -62,6 +85,18 @@ cargo install --path .
 ```
 
 ## Usage
+
+### Update
+
+```sh
+# Check for and install the latest version
+worktree-gc update
+
+# Check if a newer version is available (without installing)
+worktree-gc update --check
+```
+
+### Cleanup
 
 ```sh
 # Open the interactive command menu
