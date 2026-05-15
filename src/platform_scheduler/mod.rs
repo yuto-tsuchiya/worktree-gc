@@ -1,4 +1,4 @@
-use crate::validate_registration_name;
+use crate::{ui, validate_registration_name};
 use anyhow::{bail, Context, Result};
 use log::warn;
 use std::env;
@@ -130,11 +130,19 @@ fn install_with_args(
         );
     }
 
-    println!("✓ Schedule installed (launchd)");
-    println!("  Name:     {schedule_name}");
-    println!("  Plist:    {}", plist.display());
-    println!("  Binary:   {exe_str}");
-    println!("  Time:     {hour:02}:{minute:02} daily");
+    println!("{}", ui::success("✓ Schedule installed (launchd)"));
+    println!("  {} {}", ui::label("Name"), ui::name(schedule_name));
+    println!(
+        "  {} {}",
+        ui::label("Plist"),
+        ui::path(&plist.display().to_string())
+    );
+    println!("  {} {}", ui::label("Binary"), ui::path(&exe_str));
+    println!(
+        "  {} {}",
+        ui::label("Time"),
+        ui::value(&format!("{hour:02}:{minute:02} daily"))
+    );
     Ok(())
 }
 
@@ -232,21 +240,26 @@ pub fn uninstall(schedule_name: &str) -> Result<()> {
         }
 
         fs::remove_file(&plist).with_context(|| format!("Failed to remove {}", plist.display()))?;
-        println!("✓ Schedule removed");
-        println!("  Name:    {schedule_name}");
-        println!("  Deleted: {}", plist.display());
+        println!("{}", ui::success("✓ Schedule removed"));
+        println!("  {} {}", ui::label("Name"), ui::name(schedule_name));
+        println!(
+            "  {} {}",
+            ui::label("Deleted"),
+            ui::path(&plist.display().to_string())
+        );
         removed = true;
     }
 
     if schedule_name == DEFAULT_SCHEDULE_NAME && remove_legacy_launchd_schedule()? {
-        println!("✓ Legacy schedule removed");
+        println!("{}", ui::success("✓ Legacy schedule removed"));
         removed = true;
     }
 
     if !removed {
         println!(
-            "No schedule installed (plist not found: {})",
-            plist.display()
+            "{} {}",
+            ui::warning("No schedule installed"),
+            ui::muted(&format!("(plist not found: {})", plist.display()))
         );
     }
     Ok(())
@@ -254,8 +267,8 @@ pub fn uninstall(schedule_name: &str) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 pub fn print_config(schedule_names: &[String]) -> Result<()> {
-    println!("Schedule configuration:");
-    println!("  Scheduler: launchd");
+    println!("{}", ui::title("Schedule configuration"));
+    println!("  {} {}", ui::label("Scheduler"), ui::value("launchd"));
 
     let names = printable_schedule_names(schedule_names);
     let output = Command::new("launchctl")
@@ -268,38 +281,63 @@ pub fn print_config(schedule_names: &[String]) -> Result<()> {
         let label = schedule_label(&name)?;
         let plist = plist_path(&name)?;
         if !plist.exists() {
-            println!("  {name}: not installed");
-            println!("    Plist: {}", plist.display());
+            println!("  {} {}", ui::name(&name), ui::warning("not installed"));
+            println!(
+                "    {} {}",
+                ui::label("Plist"),
+                ui::path(&plist.display().to_string())
+            );
             continue;
         }
 
         let loaded = stdout.lines().any(|line| line.contains(&label));
         println!(
-            "  {name}: {}",
+            "  {} {}",
+            ui::name(&name),
             if loaded {
-                "active"
+                ui::success("active")
             } else {
-                "installed but not loaded"
+                ui::warning("installed but not loaded")
             }
         );
-        println!("    Plist: {}", plist.display());
+        println!(
+            "    {} {}",
+            ui::label("Plist"),
+            ui::path(&plist.display().to_string())
+        );
 
         let content = fs::read_to_string(&plist)?;
         if let (Some(h), Some(m)) = (
             extract_plist_integer(&content, "Hour"),
             extract_plist_integer(&content, "Minute"),
         ) {
-            println!("    Time:  {h:02}:{m:02} daily");
+            println!(
+                "    {} {}",
+                ui::label("Time"),
+                ui::value(&format!("{h:02}:{m:02} daily"))
+            );
         }
         if !loaded {
-            println!("    Activate: launchctl load {}", plist.display());
+            println!(
+                "    {} {}",
+                ui::label("Activate"),
+                ui::value(&format!("launchctl load {}", plist.display()))
+            );
         }
     }
 
     let legacy = legacy_plist_path()?;
     if legacy.exists() {
-        println!("  legacy daily: installed");
-        println!("    Plist: {}", legacy.display());
+        println!(
+            "  {} {}",
+            ui::name("legacy daily"),
+            ui::warning("installed")
+        );
+        println!(
+            "    {} {}",
+            ui::label("Plist"),
+            ui::path(&legacy.display().to_string())
+        );
     }
 
     Ok(())
@@ -440,12 +478,24 @@ fn install_with_args(
         );
     }
 
-    println!("✓ Schedule installed (systemd)");
-    println!("  Name:     {schedule_name}");
-    println!("  Service:  {}", svc.display());
-    println!("  Timer:    {}", tmr.display());
-    println!("  Binary:   {exe_str}");
-    println!("  Time:     {hour:02}:{minute:02} daily");
+    println!("{}", ui::success("✓ Schedule installed (systemd)"));
+    println!("  {} {}", ui::label("Name"), ui::name(schedule_name));
+    println!(
+        "  {} {}",
+        ui::label("Service"),
+        ui::path(&svc.display().to_string())
+    );
+    println!(
+        "  {} {}",
+        ui::label("Timer"),
+        ui::path(&tmr.display().to_string())
+    );
+    println!("  {} {}", ui::label("Binary"), ui::path(&exe_str));
+    println!(
+        "  {} {}",
+        ui::label("Time"),
+        ui::value(&format!("{hour:02}:{minute:02} daily"))
+    );
     Ok(())
 }
 
@@ -542,17 +592,25 @@ pub fn uninstall(schedule_name: &str) -> Result<()> {
 
     if tmr.exists() {
         fs::remove_file(&tmr)?;
-        println!("  Deleted: {}", tmr.display());
+        println!(
+            "  {} {}",
+            ui::label("Deleted"),
+            ui::path(&tmr.display().to_string())
+        );
         removed = true;
     }
     if svc.exists() {
         fs::remove_file(&svc)?;
-        println!("  Deleted: {}", svc.display());
+        println!(
+            "  {} {}",
+            ui::label("Deleted"),
+            ui::path(&svc.display().to_string())
+        );
         removed = true;
     }
 
     if schedule_name == DEFAULT_SCHEDULE_NAME && remove_legacy_systemd_schedule()? {
-        println!("✓ Legacy schedule removed");
+        println!("{}", ui::success("✓ Legacy schedule removed"));
         removed = true;
     }
 
@@ -561,27 +619,38 @@ pub fn uninstall(schedule_name: &str) -> Result<()> {
         .output();
 
     if removed {
-        println!("✓ Schedule removed");
-        println!("  Name: {schedule_name}");
+        println!("{}", ui::success("✓ Schedule removed"));
+        println!("  {} {}", ui::label("Name"), ui::name(schedule_name));
     } else {
-        println!("No schedule installed (unit files not found)");
+        println!(
+            "{}",
+            ui::warning("No schedule installed (unit files not found)")
+        );
     }
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
 pub fn print_config(schedule_names: &[String]) -> Result<()> {
-    println!("Schedule configuration:");
-    println!("  Scheduler: systemd");
+    println!("{}", ui::title("Schedule configuration"));
+    println!("  {} {}", ui::label("Scheduler"), ui::value("systemd"));
 
     for name in printable_schedule_names(schedule_names) {
         let stem = unit_stem(&name)?;
         let svc = service_path(&name)?;
         let tmr = timer_path(&name)?;
         if !tmr.exists() {
-            println!("  {name}: not installed");
-            println!("    Service: {}", svc.display());
-            println!("    Timer:   {}", tmr.display());
+            println!("  {} {}", ui::name(&name), ui::warning("not installed"));
+            println!(
+                "    {} {}",
+                ui::label("Service"),
+                ui::path(&svc.display().to_string())
+            );
+            println!(
+                "    {} {}",
+                ui::label("Timer"),
+                ui::path(&tmr.display().to_string())
+            );
             continue;
         }
 
@@ -592,13 +661,21 @@ pub fn print_config(schedule_names: &[String]) -> Result<()> {
             .context("Failed to check timer status")?;
 
         let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        println!("  {name}: {state}");
-        println!("    Service: {}", svc.display());
-        println!("    Timer:   {}", tmr.display());
+        println!("  {} {}", ui::name(&name), ui::value(&state));
+        println!(
+            "    {} {}",
+            ui::label("Service"),
+            ui::path(&svc.display().to_string())
+        );
+        println!(
+            "    {} {}",
+            ui::label("Timer"),
+            ui::path(&tmr.display().to_string())
+        );
 
         let timer_content = fs::read_to_string(&tmr)?;
         if let Some(schedule) = extract_systemd_timer_schedule(&timer_content) {
-            println!("    Schedule: {schedule}");
+            println!("    {} {}", ui::label("Schedule"), ui::value(&schedule));
         }
 
         let output = Command::new("systemctl")
@@ -607,14 +684,22 @@ pub fn print_config(schedule_names: &[String]) -> Result<()> {
         if let Ok(output) = output {
             let stdout = String::from_utf8_lossy(&output.stdout);
             for line in stdout.lines().skip(1).take(1) {
-                println!("    Next run: {line}");
+                println!("    {} {}", ui::label("Next run"), ui::value(line));
             }
         }
     }
 
     if legacy_timer_path()?.exists() {
-        println!("  legacy daily: installed");
-        println!("    Timer: {}", legacy_timer_path()?.display());
+        println!(
+            "  {} {}",
+            ui::name("legacy daily"),
+            ui::warning("installed")
+        );
+        println!(
+            "    {} {}",
+            ui::label("Timer"),
+            ui::path(&legacy_timer_path()?.display().to_string())
+        );
     }
 
     Ok(())
@@ -649,9 +734,17 @@ pub fn uninstall(_schedule_name: &str) -> Result<()> {
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn print_config(_schedule_names: &[String]) -> Result<()> {
-    println!("Schedule configuration:");
-    println!("  Scheduler: unsupported");
-    println!("  Status:    not supported on this platform");
+    println!("{}", ui::title("Schedule configuration"));
+    println!(
+        "  {} {}",
+        ui::label("Scheduler"),
+        ui::warning("unsupported")
+    );
+    println!(
+        "  {} {}",
+        ui::label("Status"),
+        ui::muted("not supported on this platform")
+    );
     Ok(())
 }
 

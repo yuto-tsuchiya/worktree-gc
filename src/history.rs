@@ -1,4 +1,5 @@
 use crate::logging::LogRecord;
+use crate::ui;
 use crate::HistoryLast;
 use anyhow::{Context, Result};
 use std::fs;
@@ -14,10 +15,14 @@ pub(crate) fn show_history(
     let path = PathBuf::from(log_file);
     if !path.exists() {
         println!(
-            "No history found (log file does not exist: {})",
-            path.display()
+            "{} {}",
+            ui::warning("No history found"),
+            ui::muted(&format!("(log file does not exist: {})", path.display()))
         );
-        println!("Run `worktree-gc` or `worktree-gc --dry-run` to generate logs.");
+        println!(
+            "{}",
+            ui::muted("Run `worktree-gc` or `worktree-gc --dry-run` to generate logs.")
+        );
         return Ok(());
     }
 
@@ -67,7 +72,7 @@ pub(crate) fn show_history(
         .collect();
 
     if records.is_empty() {
-        println!("No matching records found.");
+        println!("{}", ui::muted("No matching records found."));
         return Ok(());
     }
 
@@ -78,10 +83,11 @@ pub(crate) fn show_history(
     let shown = &records[start..];
 
     println!(
-        "Showing {} of {} records (from {})\n",
-        shown.len(),
-        records.len(),
-        path.display()
+        "{} {} {} {}\n",
+        ui::title("Showing"),
+        ui::value(&shown.len().to_string()),
+        ui::muted(&format!("of {} records from", records.len())),
+        ui::path(&path.display().to_string())
     );
 
     for record in shown {
@@ -153,8 +159,11 @@ pub(crate) fn show_history(
 
     println!();
     println!(
-        "  Shown: {} runs, {} removals, {} errors",
-        summary_count, removed_count, error_count
+        "  {} {} runs, {} removals, {} errors",
+        ui::label("Shown"),
+        ui::value(&summary_count.to_string()),
+        ui::success(&removed_count.to_string()),
+        ui::error(&error_count.to_string())
     );
 
     Ok(())
