@@ -1,3 +1,10 @@
+---
+session_id: fcdf7951-07f3-4f37-93d0-f38afac03cd0
+date: 2026-05-15
+topic: worktree-gc multi workspace and schedule registration
+resume: "copilot cli で `/resume fcdf7951-07f3-4f37-93d0-f38afac03cd0` を実行"
+---
+
 # worktree-gc
 
 Automatically clean up git worktrees whose pull requests have been merged.
@@ -49,13 +56,21 @@ worktree-gc update --check
 worktree-gc history       # show last 10 log records
 worktree-gc history --last all -a removed
 
-worktree-gc schedule      # interactive schedule wizard (launchd / systemd)
-worktree-gc schedule install --hour 9 --minute 0
-worktree-gc schedule uninstall
+worktree-gc schedule      # interactive schedule wizard: add / update / remove
+worktree-gc schedule install --name morning --workspace personal --hour 9 --minute 0
+worktree-gc schedule list
+worktree-gc schedule uninstall --name morning
 
 worktree-gc config        # show effective config
 worktree-gc config set -d /path/to/repos
+
+worktree-gc workspace      # interactive workspace wizard: add / update / remove
+worktree-gc workspace add personal -d /path/to/repos
+worktree-gc workspace list
+worktree-gc run --workspace personal
 ```
+
+If a workspace log file is left blank or set to `default`, the workspace uses the global log file. Workspace lists and confirmation prompts show the resolved global default path so it is not hidden.
 
 **Options** (apply to all subcommands):
 
@@ -65,6 +80,23 @@ worktree-gc config set -d /path/to/repos
 | `-n, --dry-run` | — | false |
 | `-v, --verbose` | — | false |
 | `--log-file` | `WORKTREE_GC_LOG` | `~/.local/share/worktree-gc/gc.jsonl` |
+| `--workspace` | — | unset |
+
+## Workspaces and schedules
+
+Use workspaces to register multiple scan directories, then bind schedules to those workspace names:
+
+```sh
+worktree-gc workspace add personal -d ~/prog/personal
+worktree-gc workspace add work -d ~/prog/work --log-file ~/.local/share/worktree-gc/work.jsonl
+
+worktree-gc schedule install --name personal-morning --workspace personal --hour 9 --minute 0
+worktree-gc schedule install --name work-evening --workspace work --hour 18 --minute 30
+```
+
+Schedule names and workspace names must start with a lowercase letter or digit and may contain lowercase letters, digits, `-`, and `_`. Registered workspaces and schedules are stored under the platform config directory returned by [`dirs::config_dir`](https://docs.rs/dirs/latest/dirs/fn.config_dir.html) and installed as launchd or systemd user entries.
+
+For compatibility, `worktree-gc schedule install --hour 9 --minute 0` still works without `--workspace`; it registers/updates a `default` workspace from the current effective `--dir` and `--log-file`.
 
 ## Logging
 
