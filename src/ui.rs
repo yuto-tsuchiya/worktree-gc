@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use console::{style, Key, StyledObject, Term};
+use console::{style, truncate_str, Key, StyledObject, Term};
 
 pub(crate) fn title(text: &str) -> StyledObject<&str> {
     style(text).cyan().bold()
@@ -72,7 +72,7 @@ pub(crate) fn select<T: AsRef<str>>(
 
     let term = Term::stderr();
     let mut selected = default.min(items.len().saturating_sub(1));
-    let rendered_lines = items.len() + 2;
+    let rendered_lines = items.len() + 1;
     let mut rendered = false;
 
     loop {
@@ -81,20 +81,19 @@ pub(crate) fn select<T: AsRef<str>>(
         }
         rendered = true;
 
-        term.write_line(&format!(
-            "{} {}",
-            label(prompt),
-            muted("← back  → select  ↑↓ move")
-        ))?;
+        let terminal_width = term.size().1 as usize;
+        let prompt_suffix = "← back  → select  ↑↓ move";
+        let prompt_line = fit_line(&format!("{prompt}: {prompt_suffix}"), terminal_width);
+        term.write_line(&prompt_line)?;
         for (index, item) in items.iter().enumerate() {
             let prefix = if index == selected {
                 success("❯").to_string()
             } else {
                 muted(" ").to_string()
             };
-            let item = item.as_ref();
+            let item = fit_line(item.as_ref(), terminal_width.saturating_sub(4));
             if index == selected {
-                term.write_line(&format!("  {prefix} {}", value(item)))?;
+                term.write_line(&format!("  {prefix} {}", value(&item)))?;
             } else {
                 term.write_line(&format!("  {prefix} {item}"))?;
             }
@@ -124,5 +123,27 @@ pub(crate) fn select<T: AsRef<str>>(
             }
             _ => {}
         }
+    }
+}
+
+fn fit_line(text: &str, width: usize) -> String {
+    truncate_str(text, width.max(1), "…").into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use console::measure_text_width;
+
+    #[test]
+    fn test_fit_line_keeps_short_text() {
+        assert_eq!(fit_line("short", 10), "short");
+    }
+
+    #[test]
+    fn test_fit_line_truncates_to_display_width() {
+        let line = fit_line("a very long workspace label", 10);
+        assert!(measure_text_width(&line) <= 10);
+        assert!(line.ends_with('…'));
     }
 }
