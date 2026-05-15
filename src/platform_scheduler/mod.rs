@@ -677,6 +677,26 @@ mod tests {
         assert!(super::validate_schedule_name("../daily").is_err());
     }
 
+    #[test]
+    fn test_printable_schedule_names_defaults_when_empty() {
+        assert_eq!(
+            super::printable_schedule_names(&[]),
+            vec![super::DEFAULT_SCHEDULE_NAME.to_string()]
+        );
+    }
+
+    #[test]
+    fn test_printable_schedule_names_sorts_and_deduplicates() {
+        assert_eq!(
+            super::printable_schedule_names(&[
+                "nightly".to_string(),
+                "default".to_string(),
+                "nightly".to_string(),
+            ]),
+            vec!["default".to_string(), "nightly".to_string()]
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn test_render_launchd_plist_uses_workspace_argument() {
