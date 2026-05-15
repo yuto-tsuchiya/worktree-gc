@@ -3,9 +3,9 @@ use crate::config::{
     WorkspaceConfig,
 };
 use crate::defaults::{default_log_file, validate_registration_name};
+use crate::ui;
 use crate::{has_cli_option, Cli, WorkspaceAction};
 use anyhow::{bail, Result};
-use console::style;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -57,10 +57,10 @@ pub(crate) fn prompt_run_if_needed(cli: &mut Cli) -> Result<()> {
     }
 
     println!();
-    println!("  {}", style("Run cleanup").bold());
-    println!("  Workspace: {}", style(&workspace.name).cyan());
-    println!("  Directory: {}", style(&cli.dir).cyan());
-    println!("  Log file:  {}", cli.log_file);
+    println!("  {}", ui::title("Run cleanup"));
+    println!("  {} {}", ui::label("Workspace"), ui::name(&workspace.name));
+    println!("  {} {}", ui::label("Directory"), ui::path(&cli.dir));
+    println!("  {} {}", ui::label("Log file"), ui::path(&cli.log_file));
     println!();
 
     Ok(())
@@ -81,13 +81,21 @@ fn add_workspace(name: &str, dir: &str, log_file: Option<String>) -> Result<()> 
     });
     save_runtime_config(&config)?;
 
-    println!("Saved workspace:");
-    println!("  Name:   {name}");
-    println!("  Dir:    {dir}");
+    println!("{}", ui::success("Saved workspace"));
+    println!("  {} {}", ui::label("Name"), ui::name(name));
+    println!("  {} {}", ui::label("Dir"), ui::path(dir));
     if let Some(workspace) = config.find_workspace(name) {
-        println!("  Log:    {}", workspace_log_display(workspace, &config));
+        println!(
+            "  {} {}",
+            ui::label("Log"),
+            ui::value(&workspace_log_display(workspace, &config))
+        );
     }
-    println!("  Config: {}", runtime_config_path()?.display());
+    println!(
+        "  {} {}",
+        ui::label("Config"),
+        ui::path(&runtime_config_path()?.display().to_string())
+    );
     Ok(())
 }
 
@@ -113,7 +121,7 @@ fn remove_workspace(name: &str) -> Result<()> {
     }
 
     save_runtime_config(&config)?;
-    println!("Removed workspace: {name}");
+    println!("{} {}", ui::success("Removed workspace:"), ui::name(name));
     Ok(())
 }
 
@@ -128,8 +136,8 @@ pub(crate) fn interactive_wizard(cli: &Cli) -> Result<()> {
 
     let config = load_runtime_config()?;
     println!();
-    println!("  {}", style("worktree-gc workspaces").bold());
-    println!("  {}", style("Manage named scan directories").dim());
+    println!("  {}", ui::title("worktree-gc workspaces"));
+    println!("  {}", ui::subtitle("Manage named scan directories"));
     println!();
     print_registered(&config);
     println!();
@@ -157,7 +165,7 @@ pub(crate) fn interactive_wizard(cli: &Cli) -> Result<()> {
             Ok(())
         }
         _ => {
-            println!("Cancelled.");
+            println!("{}", ui::muted("Cancelled."));
             Ok(())
         }
     }
@@ -195,7 +203,7 @@ fn update_workspace_interactive(cli: &Cli, config: &RuntimeConfigFile) -> Result
     use dialoguer::{Confirm, Select};
 
     if config.workspaces.is_empty() {
-        println!("No registered workspaces to update.");
+        println!("{}", ui::muted("No registered workspaces to update."));
         return Ok(());
     }
 
@@ -225,7 +233,7 @@ fn update_workspace_interactive(cli: &Cli, config: &RuntimeConfigFile) -> Result
         .default(true)
         .interact()?
     {
-        println!("Cancelled.");
+        println!("{}", ui::muted("Cancelled."));
         return Ok(());
     }
 
@@ -236,7 +244,7 @@ fn remove_workspace_interactive(config: &RuntimeConfigFile) -> Result<()> {
     use dialoguer::{Confirm, Select};
 
     if config.workspaces.is_empty() {
-        println!("No registered workspaces to remove.");
+        println!("{}", ui::muted("No registered workspaces to remove."));
         return Ok(());
     }
 
@@ -257,7 +265,7 @@ fn remove_workspace_interactive(config: &RuntimeConfigFile) -> Result<()> {
         .default(false)
         .interact()?
     {
-        println!("Cancelled.");
+        println!("{}", ui::muted("Cancelled."));
         return Ok(());
     }
 
@@ -322,16 +330,20 @@ fn prompt_workspace_settings_with_defaults(
 }
 
 pub(crate) fn print_registered(config: &RuntimeConfigFile) {
-    println!("Registered workspaces:");
+    println!("{}", ui::title("Registered workspaces"));
     if config.workspaces.is_empty() {
-        println!("  (none)");
+        println!("  {}", ui::muted("(none)"));
         return;
     }
 
     for workspace in &config.workspaces {
-        println!("  {}", workspace.name);
-        println!("    Dir: {}", workspace.dir);
-        println!("    Log: {}", workspace_log_display(workspace, config));
+        println!("  {}", ui::name(&workspace.name));
+        println!("    {} {}", ui::label("Dir"), ui::path(&workspace.dir));
+        println!(
+            "    {} {}",
+            ui::label("Log"),
+            ui::value(&workspace_log_display(workspace, config))
+        );
     }
 }
 
@@ -427,11 +439,12 @@ fn print_workspace_summary(
     default_effective_log_file: &str,
 ) {
     println!();
-    println!("  {}", style("Summary:").bold());
-    println!("  Workspace: {}", style(name).cyan());
-    println!("  Directory: {}", style(dir).cyan());
+    println!("  {}", ui::title("Summary"));
+    println!("  {} {}", ui::label("Workspace"), ui::name(name));
+    println!("  {} {}", ui::label("Directory"), ui::path(dir));
     println!(
-        "  Log file:  {}",
+        "  {} {}",
+        ui::label("Log file"),
         log_file
             .map(|log_file| log_file.to_string())
             .unwrap_or_else(|| format!("(global default: {default_effective_log_file})"))

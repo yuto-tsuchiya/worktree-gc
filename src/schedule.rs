@@ -3,9 +3,9 @@ use crate::config::{
     ScheduleConfig, WorkspaceConfig,
 };
 use crate::defaults::validate_registration_name;
+use crate::ui;
 use crate::{has_cli_option, platform_scheduler, workspace, Cli, ScheduleAction};
 use anyhow::{bail, Result};
-use console::style;
 use std::ffi::OsString;
 
 pub(crate) fn execute_action(
@@ -75,9 +75,13 @@ fn install(
     });
     save_runtime_config(&config)?;
 
-    println!("  Schedule:  {schedule_name}");
-    println!("  Workspace: {workspace_name}");
-    println!("  Config:    {}", runtime_config_path()?.display());
+    println!("  {} {}", ui::label("Schedule"), ui::name(schedule_name));
+    println!("  {} {}", ui::label("Workspace"), ui::name(&workspace_name));
+    println!(
+        "  {} {}",
+        ui::label("Config"),
+        ui::path(&runtime_config_path()?.display().to_string())
+    );
     Ok(())
 }
 
@@ -101,7 +105,7 @@ fn uninstall(name: &str, all: bool) -> Result<()> {
         }
         config.schedules.clear();
         save_runtime_config(&config)?;
-        println!("Removed all registered schedules.");
+        println!("{}", ui::success("Removed all registered schedules."));
         return Ok(());
     }
 
@@ -109,7 +113,11 @@ fn uninstall(name: &str, all: bool) -> Result<()> {
     platform_scheduler::uninstall(name)?;
     config.remove_schedule(name);
     save_runtime_config(&config)?;
-    println!("Removed schedule metadata: {name}");
+    println!(
+        "{} {}",
+        ui::success("Removed schedule metadata:"),
+        ui::name(name)
+    );
     Ok(())
 }
 
@@ -125,8 +133,8 @@ fn interactive_wizard(cli: &Cli) -> Result<()> {
 
     let mut config = load_runtime_config()?;
     println!();
-    println!("  {}", style("worktree-gc scheduler").bold());
-    println!("  {}", style("Manage automatic cleanup schedules").dim());
+    println!("  {}", ui::title("worktree-gc scheduler"));
+    println!("  {}", ui::subtitle("Manage automatic cleanup schedules"));
     println!();
     print_registered(&config);
     println!();
@@ -153,7 +161,7 @@ fn interactive_wizard(cli: &Cli) -> Result<()> {
         2 => remove_schedule_interactive(&mut config),
         3 => platform_scheduler::print_config(&configured_names(&config)),
         _ => {
-            println!("Cancelled.");
+            println!("{}", ui::muted("Cancelled."));
             Ok(())
         }
     }
@@ -199,7 +207,7 @@ fn update_schedule_interactive(cli: &Cli, config: &mut RuntimeConfigFile) -> Res
     use dialoguer::{Confirm, Select};
 
     if config.schedules.is_empty() {
-        println!("No registered schedules to update.");
+        println!("{}", ui::muted("No registered schedules to update."));
         return add_schedule_interactive(cli, config);
     }
 
@@ -230,7 +238,7 @@ fn update_schedule_interactive(cli: &Cli, config: &mut RuntimeConfigFile) -> Res
         .default(true)
         .interact()?
     {
-        println!("Cancelled.");
+        println!("{}", ui::muted("Cancelled."));
         return Ok(());
     }
 
@@ -241,7 +249,7 @@ fn remove_schedule_interactive(config: &mut RuntimeConfigFile) -> Result<()> {
     use dialoguer::{Confirm, Select};
 
     if config.schedules.is_empty() {
-        println!("No registered schedules to remove.");
+        println!("{}", ui::muted("No registered schedules to remove."));
         return Ok(());
     }
 
@@ -267,14 +275,18 @@ fn remove_schedule_interactive(config: &mut RuntimeConfigFile) -> Result<()> {
         .default(false)
         .interact()?
     {
-        println!("Cancelled.");
+        println!("{}", ui::muted("Cancelled."));
         return Ok(());
     }
 
     platform_scheduler::uninstall(&schedule_name)?;
     config.remove_schedule(&schedule_name);
     save_runtime_config(config)?;
-    println!("Removed schedule metadata: {schedule_name}");
+    println!(
+        "{} {}",
+        ui::success("Removed schedule metadata:"),
+        ui::name(&schedule_name)
+    );
     Ok(())
 }
 
@@ -294,9 +306,13 @@ fn install_from_parts(
     });
     save_runtime_config(config)?;
 
-    println!("  Schedule:  {name}");
-    println!("  Workspace: {workspace}");
-    println!("  Config:    {}", runtime_config_path()?.display());
+    println!("  {} {}", ui::label("Schedule"), ui::name(name));
+    println!("  {} {}", ui::label("Workspace"), ui::name(workspace));
+    println!(
+        "  {} {}",
+        ui::label("Config"),
+        ui::path(&runtime_config_path()?.display().to_string())
+    );
     Ok(())
 }
 
@@ -359,29 +375,38 @@ fn default_new_schedule_name(config: &RuntimeConfigFile) -> String {
 
 fn print_schedule_summary(name: &str, workspace: &str, hour: u8, minute: u8) {
     println!();
-    println!("  {}", style("Summary:").bold());
-    println!("  Schedule:  {}", style(name).cyan());
-    println!("  Workspace: {}", style(workspace).cyan());
+    println!("  {}", ui::title("Summary"));
+    println!("  {} {}", ui::label("Schedule"), ui::name(name));
+    println!("  {} {}", ui::label("Workspace"), ui::name(workspace));
     println!(
-        "  Run daily: {}",
-        style(format!("{hour:02}:{minute:02}")).cyan()
+        "  {} {}",
+        ui::label("Run daily"),
+        ui::value(&format!("{hour:02}:{minute:02}"))
     );
     println!();
 }
 
 pub(crate) fn print_registered(config: &RuntimeConfigFile) {
-    println!("Registered schedules:");
+    println!("{}", ui::title("Registered schedules"));
     if config.schedules.is_empty() {
-        println!("  (none)");
+        println!("  {}", ui::muted("(none)"));
         return;
     }
 
     for schedule in &config.schedules {
-        println!("  {}", schedule.name);
-        println!("    Workspace: {}", schedule.workspace);
+        println!("  {}", ui::name(&schedule.name));
         println!(
-            "    Time:      {:02}:{:02} daily",
-            schedule.hour, schedule.minute
+            "    {} {}",
+            ui::label("Workspace"),
+            ui::name(&schedule.workspace)
+        );
+        println!(
+            "    {} {}",
+            ui::label("Time"),
+            ui::value(&format!(
+                "{:02}:{:02} daily",
+                schedule.hour, schedule.minute
+            ))
         );
     }
 }

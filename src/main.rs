@@ -1,6 +1,5 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use console::style;
 use std::ffi::OsString;
 use std::str::FromStr;
 
@@ -11,6 +10,7 @@ mod history;
 mod logging;
 mod platform_scheduler;
 mod schedule;
+mod ui;
 mod update;
 mod workspace;
 
@@ -266,10 +266,10 @@ fn interactive_command_menu(dry_run: bool) -> Result<Option<Commands>> {
     use dialoguer::Select;
 
     println!();
-    println!("  {}", style("worktree-gc").bold());
-    println!("  {}", style("Select a command").dim());
+    println!("  {}", ui::title("worktree-gc"));
+    println!("  {}", ui::subtitle("Select a command"));
     if dry_run {
-        println!("  {}", style("Run mode: dry-run").cyan());
+        println!("  {} {}", ui::label("Run mode"), ui::warning("dry-run"));
     }
     println!();
 
@@ -304,7 +304,7 @@ fn interactive_command_menu(dry_run: bool) -> Result<Option<Commands>> {
         })),
         4 => Ok(Some(Commands::Config { action: None })),
         _ => {
-            println!("Cancelled.");
+            println!("{}", ui::muted("Cancelled."));
             Ok(None)
         }
     }
@@ -344,25 +344,33 @@ fn show_config(cli: &Cli) -> Result<()> {
     let config_path = runtime_config_path()?;
     let saved = load_runtime_config()?;
 
-    println!("Runtime configuration:");
-    println!("  Work dir:  {}", cli.dir);
+    println!("{}", ui::title("Runtime configuration"));
+    println!("  {} {}", ui::label("Work dir"), ui::path(&cli.dir));
+    println!("  {} {}", ui::label("Dry run"), ui::enabled(cli.dry_run));
+    println!("  {} {}", ui::label("Verbose"), ui::enabled(cli.verbose));
+    println!("  {} {}", ui::label("Log file"), ui::path(&cli.log_file));
     println!(
-        "  Dry run:   {}",
-        if cli.dry_run { "enabled" } else { "disabled" }
+        "  {} {}",
+        ui::label("Config"),
+        ui::path(&config_path.display().to_string())
     );
     println!(
-        "  Verbose:   {}",
-        if cli.verbose { "enabled" } else { "disabled" }
+        "  {} {}",
+        ui::label("Saved dir"),
+        saved
+            .dir
+            .as_deref()
+            .map(ui::path)
+            .unwrap_or_else(|| ui::muted("(not set)"))
     );
-    println!("  Log file:  {}", cli.log_file);
-    println!("  Config:    {}", config_path.display());
     println!(
-        "  Saved dir: {}",
-        saved.dir.as_deref().unwrap_or("(not set)")
-    );
-    println!(
-        "  Saved log: {}",
-        saved.log_file.as_deref().unwrap_or("(not set)")
+        "  {} {}",
+        ui::label("Saved log"),
+        saved
+            .log_file
+            .as_deref()
+            .map(ui::path)
+            .unwrap_or_else(|| ui::muted("(not set)"))
     );
     println!();
     workspace::print_registered(&saved);
@@ -393,14 +401,18 @@ fn set_runtime_config(cli: &Cli, raw_args: &[OsString]) -> Result<()> {
 
     save_runtime_config(&config)?;
 
-    println!("Saved runtime defaults:");
+    println!("{}", ui::success("Saved runtime defaults"));
     if set_dir {
-        println!("  Work dir:  {}", cli.dir);
+        println!("  {} {}", ui::label("Work dir"), ui::path(&cli.dir));
     }
     if set_log_file {
-        println!("  Log file:  {}", cli.log_file);
+        println!("  {} {}", ui::label("Log file"), ui::path(&cli.log_file));
     }
-    println!("  Config:    {}", runtime_config_path()?.display());
+    println!(
+        "  {} {}",
+        ui::label("Config"),
+        ui::path(&runtime_config_path()?.display().to_string())
+    );
     Ok(())
 }
 
@@ -419,9 +431,9 @@ fn unset_runtime_config(field: ConfigField) -> Result<()> {
     save_runtime_config(&config)?;
 
     match field {
-        ConfigField::Dir => println!("Removed saved work directory default."),
-        ConfigField::LogFile => println!("Removed saved log file default."),
-        ConfigField::All => println!("Removed all saved runtime defaults."),
+        ConfigField::Dir => println!("{}", ui::success("Removed saved work directory default.")),
+        ConfigField::LogFile => println!("{}", ui::success("Removed saved log file default.")),
+        ConfigField::All => println!("{}", ui::success("Removed all saved runtime defaults.")),
     }
 
     Ok(())
