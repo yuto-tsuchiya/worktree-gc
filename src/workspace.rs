@@ -28,12 +28,10 @@ pub(crate) fn execute_action(
     }
 }
 
-pub(crate) fn prompt_run_if_needed(cli: &mut Cli) -> Result<()> {
-    use dialoguer::Select;
-
+pub(crate) fn prompt_run_if_needed(cli: &mut Cli) -> Result<ui::Navigation> {
     let config = load_runtime_config()?;
     if config.workspaces.len() <= 1 {
-        return Ok(());
+        return Ok(ui::Navigation::Done);
     }
 
     let workspace_labels: Vec<String> = config
@@ -41,11 +39,10 @@ pub(crate) fn prompt_run_if_needed(cli: &mut Cli) -> Result<()> {
         .iter()
         .map(|workspace| format!("{} ({})", workspace.name, workspace.dir))
         .collect();
-    let selection = Select::new()
-        .with_prompt("Select workspace to run cleanup")
-        .items(&workspace_labels)
-        .default(0)
-        .interact()?;
+    let selection = match ui::select("Select workspace to run cleanup", &workspace_labels, 0)? {
+        ui::MenuAction::Selected(selection) => selection,
+        ui::MenuAction::Back => return Ok(ui::Navigation::Back),
+    };
     let workspace = &config.workspaces[selection];
 
     cli.workspace = Some(workspace.name.clone());
@@ -63,7 +60,7 @@ pub(crate) fn prompt_run_if_needed(cli: &mut Cli) -> Result<()> {
     println!("  {} {}", ui::label("Log file"), ui::path(&cli.log_file));
     println!();
 
-    Ok(())
+    Ok(ui::Navigation::Done)
 }
 
 fn add_workspace(name: &str, dir: &str, log_file: Option<String>) -> Result<()> {
@@ -131,9 +128,7 @@ fn list_workspaces() -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn interactive_wizard(cli: &Cli) -> Result<()> {
-    use dialoguer::Select;
-
+pub(crate) fn interactive_wizard(cli: &Cli) -> Result<ui::Navigation> {
     let config = load_runtime_config()?;
     println!();
     println!("  {}", ui::title("worktree-gc workspaces"));
@@ -150,25 +145,23 @@ pub(crate) fn interactive_wizard(cli: &Cli) -> Result<()> {
         "Cancel",
     ];
     let default_choice = if config.workspaces.is_empty() { 0 } else { 1 };
-    let selection = Select::new()
-        .with_prompt("What would you like to do?")
-        .items(&choices)
-        .default(default_choice)
-        .interact()?;
+    let selection = match ui::select("What would you like to do?", &choices, default_choice)? {
+        ui::MenuAction::Selected(selection) => selection,
+        ui::MenuAction::Back => return Ok(ui::Navigation::Back),
+    };
 
     match selection {
-        0 => add_workspace_interactive(cli, &config),
-        1 => update_workspace_interactive(cli, &config),
-        2 => remove_workspace_interactive(&config),
+        0 => add_workspace_interactive(cli, &config)?,
+        1 => update_workspace_interactive(cli, &config)?,
+        2 => remove_workspace_interactive(&config)?,
         3 => {
             print_registered(&config);
-            Ok(())
         }
         _ => {
             println!("{}", ui::muted("Cancelled."));
-            Ok(())
         }
     }
+    Ok(ui::Navigation::Done)
 }
 
 fn add_workspace_interactive(cli: &Cli, config: &RuntimeConfigFile) -> Result<()> {
@@ -200,7 +193,7 @@ fn add_workspace_interactive(cli: &Cli, config: &RuntimeConfigFile) -> Result<()
 }
 
 fn update_workspace_interactive(cli: &Cli, config: &RuntimeConfigFile) -> Result<()> {
-    use dialoguer::{Confirm, Select};
+    use dialoguer::Confirm;
 
     if config.workspaces.is_empty() {
         println!("{}", ui::muted("No registered workspaces to update."));
@@ -212,11 +205,10 @@ fn update_workspace_interactive(cli: &Cli, config: &RuntimeConfigFile) -> Result
         .iter()
         .map(|workspace| format!("{} ({})", workspace.name, workspace.dir))
         .collect();
-    let selection = Select::new()
-        .with_prompt("Select a workspace to update")
-        .items(&workspace_labels)
-        .default(0)
-        .interact()?;
+    let selection = match ui::select("Select a workspace to update", &workspace_labels, 0)? {
+        ui::MenuAction::Selected(selection) => selection,
+        ui::MenuAction::Back => return Ok(()),
+    };
     let workspace = config.workspaces[selection].clone();
 
     let default_log_file = cli.log_file.clone();
@@ -241,7 +233,7 @@ fn update_workspace_interactive(cli: &Cli, config: &RuntimeConfigFile) -> Result
 }
 
 fn remove_workspace_interactive(config: &RuntimeConfigFile) -> Result<()> {
-    use dialoguer::{Confirm, Select};
+    use dialoguer::Confirm;
 
     if config.workspaces.is_empty() {
         println!("{}", ui::muted("No registered workspaces to remove."));
@@ -253,11 +245,10 @@ fn remove_workspace_interactive(config: &RuntimeConfigFile) -> Result<()> {
         .iter()
         .map(|workspace| format!("{} ({})", workspace.name, workspace.dir))
         .collect();
-    let selection = Select::new()
-        .with_prompt("Select a workspace to remove")
-        .items(&workspace_labels)
-        .default(0)
-        .interact()?;
+    let selection = match ui::select("Select a workspace to remove", &workspace_labels, 0)? {
+        ui::MenuAction::Selected(selection) => selection,
+        ui::MenuAction::Back => return Ok(()),
+    };
     let workspace_name = config.workspaces[selection].name.clone();
 
     if !Confirm::new()
@@ -360,9 +351,7 @@ pub(crate) fn prompt_choice(
     cli: &Cli,
     config: &mut RuntimeConfigFile,
     current_workspace: Option<&str>,
-) -> Result<String> {
-    use dialoguer::Select;
-
+) -> Result<Option<String>> {
     let mut workspace_names: Vec<String> = config
         .workspaces
         .iter()
@@ -386,19 +375,18 @@ pub(crate) fn prompt_choice(
             dir: cli.dir.clone(),
             log_file: Some(cli.log_file.clone()),
         });
-        return Ok("default".to_string());
+        return Ok(Some("default".to_string()));
     }
 
     let mut choices = workspace_names.clone();
     choices.push("Use current --dir as default workspace".to_string());
-    let selection = Select::new()
-        .with_prompt("Workspace")
-        .items(&choices)
-        .default(current_index)
-        .interact()?;
+    let selection = match ui::select("Workspace", &choices, current_index)? {
+        ui::MenuAction::Selected(selection) => selection,
+        ui::MenuAction::Back => return Ok(None),
+    };
 
     if selection < workspace_names.len() {
-        return Ok(workspace_names[selection].clone());
+        return Ok(Some(workspace_names[selection].clone()));
     }
 
     config.upsert_workspace(WorkspaceConfig {
@@ -406,7 +394,7 @@ pub(crate) fn prompt_choice(
         dir: cli.dir.clone(),
         log_file: Some(cli.log_file.clone()),
     });
-    Ok("default".to_string())
+    Ok(Some("default".to_string()))
 }
 
 fn default_new_workspace_name(config: &RuntimeConfigFile) -> String {

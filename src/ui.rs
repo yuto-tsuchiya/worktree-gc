@@ -1,4 +1,5 @@
-use console::{style, StyledObject};
+use anyhow::{bail, Result};
+use console::{style, Key, StyledObject, Term};
 
 pub(crate) fn title(text: &str) -> StyledObject<&str> {
     style(text).cyan().bold()
@@ -45,5 +46,83 @@ pub(crate) fn enabled(value: bool) -> StyledObject<&'static str> {
         success("enabled")
     } else {
         muted("disabled")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MenuAction {
+    Selected(usize),
+    Back,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Navigation {
+    Done,
+    Back,
+}
+
+pub(crate) fn select<T: AsRef<str>>(
+    prompt: &str,
+    items: &[T],
+    default: usize,
+) -> Result<MenuAction> {
+    if items.is_empty() {
+        bail!("menu must contain at least one item");
+    }
+
+    let term = Term::stderr();
+    let mut selected = default.min(items.len().saturating_sub(1));
+    let rendered_lines = items.len() + 2;
+    let mut rendered = false;
+
+    loop {
+        if rendered {
+            term.clear_last_lines(rendered_lines)?;
+        }
+        rendered = true;
+
+        term.write_line(&format!(
+            "{} {}",
+            label(prompt),
+            muted("← back  → select  ↑↓ move")
+        ))?;
+        for (index, item) in items.iter().enumerate() {
+            let prefix = if index == selected {
+                success("❯").to_string()
+            } else {
+                muted(" ").to_string()
+            };
+            let item = item.as_ref();
+            if index == selected {
+                term.write_line(&format!("  {prefix} {}", value(item)))?;
+            } else {
+                term.write_line(&format!("  {prefix} {item}"))?;
+            }
+        }
+        term.flush()?;
+
+        match term.read_key()? {
+            Key::ArrowDown | Key::Tab | Key::Char('j') => {
+                selected = (selected + 1) % items.len();
+            }
+            Key::ArrowUp | Key::BackTab | Key::Char('k') => {
+                selected = (selected + items.len() - 1) % items.len();
+            }
+            Key::ArrowLeft | Key::Escape | Key::Char('h') | Key::Char('q') => {
+                term.clear_last_lines(rendered_lines)?;
+                term.write_line(&format!("{} {}", label(prompt), muted("back")))?;
+                return Ok(MenuAction::Back);
+            }
+            Key::ArrowRight | Key::Enter | Key::Char('l') | Key::Char(' ') => {
+                term.clear_last_lines(rendered_lines)?;
+                term.write_line(&format!(
+                    "{} {}",
+                    label(prompt),
+                    value(items[selected].as_ref())
+                ))?;
+                return Ok(MenuAction::Selected(selected));
+            }
+            _ => {}
+        }
     }
 }

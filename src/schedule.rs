@@ -19,7 +19,7 @@ pub(crate) fn execute_action(
         }
         Some(ScheduleAction::Uninstall { name, all }) => uninstall(&name, all),
         Some(ScheduleAction::List) => list(),
-        None => interactive_wizard(cli),
+        None => interactive_wizard(cli).map(|_| ()),
     }
 }
 
@@ -128,9 +128,7 @@ fn list() -> Result<()> {
     platform_scheduler::print_config(&configured_names(&config))
 }
 
-fn interactive_wizard(cli: &Cli) -> Result<()> {
-    use dialoguer::Select;
-
+pub(crate) fn interactive_wizard(cli: &Cli) -> Result<ui::Navigation> {
     let mut config = load_runtime_config()?;
     println!();
     println!("  {}", ui::title("worktree-gc scheduler"));
@@ -149,22 +147,21 @@ fn interactive_wizard(cli: &Cli) -> Result<()> {
         "Cancel",
     ];
     let default_choice = if config.schedules.is_empty() { 0 } else { 1 };
-    let selection = Select::new()
-        .with_prompt("What would you like to do?")
-        .items(&choices)
-        .default(default_choice)
-        .interact()?;
+    let selection = match ui::select("What would you like to do?", &choices, default_choice)? {
+        ui::MenuAction::Selected(selection) => selection,
+        ui::MenuAction::Back => return Ok(ui::Navigation::Back),
+    };
 
     match selection {
-        0 => add_schedule_interactive(cli, &mut config),
-        1 => update_schedule_interactive(cli, &mut config),
-        2 => remove_schedule_interactive(&mut config),
-        3 => platform_scheduler::print_config(&configured_names(&config)),
+        0 => add_schedule_interactive(cli, &mut config)?,
+        1 => update_schedule_interactive(cli, &mut config)?,
+        2 => remove_schedule_interactive(&mut config)?,
+        3 => platform_scheduler::print_config(&configured_names(&config))?,
         _ => {
             println!("{}", ui::muted("Cancelled."));
-            Ok(())
         }
     }
+    Ok(ui::Navigation::Done)
 }
 
 fn add_schedule_interactive(cli: &Cli, config: &mut RuntimeConfigFile) -> Result<()> {
@@ -187,7 +184,9 @@ fn add_schedule_interactive(cli: &Cli, config: &mut RuntimeConfigFile) -> Result
         bail!("Schedule already exists: {name}");
     }
 
-    let workspace = workspace::prompt_choice(cli, config, None)?;
+    let Some(workspace) = workspace::prompt_choice(cli, config, None)? else {
+        return Ok(());
+    };
     let (hour, minute) = prompt_schedule_time("09:00")?;
     print_schedule_summary(&name, &workspace, hour, minute);
 
@@ -204,7 +203,7 @@ fn add_schedule_interactive(cli: &Cli, config: &mut RuntimeConfigFile) -> Result
 }
 
 fn update_schedule_interactive(cli: &Cli, config: &mut RuntimeConfigFile) -> Result<()> {
-    use dialoguer::{Confirm, Select};
+    use dialoguer::Confirm;
 
     if config.schedules.is_empty() {
         println!("{}", ui::muted("No registered schedules to update."));
@@ -221,14 +220,15 @@ fn update_schedule_interactive(cli: &Cli, config: &mut RuntimeConfigFile) -> Res
             )
         })
         .collect();
-    let selection = Select::new()
-        .with_prompt("Select a schedule to update")
-        .items(&schedule_labels)
-        .default(0)
-        .interact()?;
+    let selection = match ui::select("Select a schedule to update", &schedule_labels, 0)? {
+        ui::MenuAction::Selected(selection) => selection,
+        ui::MenuAction::Back => return Ok(()),
+    };
     let current = config.schedules[selection].clone();
 
-    let workspace = workspace::prompt_choice(cli, config, Some(&current.workspace))?;
+    let Some(workspace) = workspace::prompt_choice(cli, config, Some(&current.workspace))? else {
+        return Ok(());
+    };
     let (hour, minute) =
         prompt_schedule_time(&format!("{:02}:{:02}", current.hour, current.minute))?;
     print_schedule_summary(&current.name, &workspace, hour, minute);
@@ -246,7 +246,7 @@ fn update_schedule_interactive(cli: &Cli, config: &mut RuntimeConfigFile) -> Res
 }
 
 fn remove_schedule_interactive(config: &mut RuntimeConfigFile) -> Result<()> {
-    use dialoguer::{Confirm, Select};
+    use dialoguer::Confirm;
 
     if config.schedules.is_empty() {
         println!("{}", ui::muted("No registered schedules to remove."));
@@ -263,11 +263,10 @@ fn remove_schedule_interactive(config: &mut RuntimeConfigFile) -> Result<()> {
             )
         })
         .collect();
-    let selection = Select::new()
-        .with_prompt("Select a schedule to remove")
-        .items(&schedule_labels)
-        .default(0)
-        .interact()?;
+    let selection = match ui::select("Select a schedule to remove", &schedule_labels, 0)? {
+        ui::MenuAction::Selected(selection) => selection,
+        ui::MenuAction::Back => return Ok(()),
+    };
     let schedule_name = config.schedules[selection].name.clone();
 
     if !Confirm::new()

@@ -179,22 +179,49 @@ fn main() -> Result<()> {
     let raw_args: Vec<OsString> = std::env::args_os().collect();
     let mut cli = Cli::parse();
     apply_saved_runtime_config(&mut cli, &raw_args)?;
+    if cli.command.is_none() && should_open_interactive_menu(&raw_args) {
+        return run_interactive_session(&cli, &raw_args);
+    }
+
     let command = match cli.command.clone() {
         Some(command) => command,
-        None => {
-            if should_open_interactive_menu(&raw_args) {
-                match interactive_command_menu(cli.dry_run) {
-                    Ok(Some(command)) => command,
-                    Ok(None) => return Ok(()),
-                    Err(err) => return Err(err),
-                }
-            } else {
-                Commands::Run
-            }
-        }
+        None => Commands::Run,
     };
 
     execute_command(&cli, command, &raw_args)
+}
+
+fn run_interactive_session(cli: &Cli, raw_args: &[OsString]) -> Result<()> {
+    loop {
+        let Some(command) = interactive_command_menu(cli.dry_run)? else {
+            return Ok(());
+        };
+
+        match command {
+            Commands::Run => {
+                let mut run_cli = cli.clone();
+                if run_cli.workspace.is_none()
+                    && workspace::prompt_run_if_needed(&mut run_cli)? == ui::Navigation::Back
+                {
+                    continue;
+                }
+                return run_gc(&run_cli);
+            }
+            Commands::Schedule { action: None } => {
+                if schedule::interactive_wizard(cli)? == ui::Navigation::Back {
+                    continue;
+                }
+                return Ok(());
+            }
+            Commands::Workspace { action: None } => {
+                if workspace::interactive_wizard(cli)? == ui::Navigation::Back {
+                    continue;
+                }
+                return Ok(());
+            }
+            command => return execute_command(cli, command, raw_args),
+        }
+    }
 }
 
 fn should_open_interactive_menu(args: &[OsString]) -> bool {
@@ -263,8 +290,6 @@ fn apply_runtime_config_values(
 }
 
 fn interactive_command_menu(dry_run: bool) -> Result<Option<Commands>> {
-    use dialoguer::Select;
-
     println!();
     println!("  {}", ui::title("worktree-gc"));
     println!("  {}", ui::subtitle("Select a command"));
@@ -287,11 +312,10 @@ fn interactive_command_menu(dry_run: bool) -> Result<Option<Commands>> {
         "Cancel",
     ];
 
-    let selection = Select::new()
-        .with_prompt("Choose a command")
-        .items(&choices)
-        .default(0)
-        .interact()?;
+    let selection = match ui::select("Choose a command", &choices, 0)? {
+        ui::MenuAction::Selected(selection) => selection,
+        ui::MenuAction::Back => return Ok(None),
+    };
 
     match selection {
         0 => Ok(Some(Commands::Run)),
@@ -315,7 +339,7 @@ fn execute_command(cli: &Cli, command: Commands, raw_args: &[OsString]) -> Resul
         Commands::Schedule { action } => schedule::execute_action(cli, action, raw_args),
         Commands::Workspace { action } => match action {
             Some(action) => workspace::execute_action(cli, action, raw_args),
-            None => workspace::interactive_wizard(cli),
+            None => workspace::interactive_wizard(cli).map(|_| ()),
         },
         Commands::Config { action } => match action {
             Some(ConfigAction::Set) => set_runtime_config(cli, raw_args),
