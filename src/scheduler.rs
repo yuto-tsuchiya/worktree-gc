@@ -1,3 +1,4 @@
+use crate::validate_registration_name;
 use anyhow::{bail, Context, Result};
 use log::warn;
 use std::env;
@@ -5,19 +6,52 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+const DEFAULT_SCHEDULE_NAME: &str = "default";
+const LEGACY_SCHEDULE_NAME: &str = "daily";
+
+pub fn validate_schedule_name(name: &str) -> Result<()> {
+    validate_registration_name("schedule", name)?;
+    if name == LEGACY_SCHEDULE_NAME {
+        bail!("schedule name '{LEGACY_SCHEDULE_NAME}' is reserved for legacy migration");
+    }
+    Ok(())
+}
+
+fn workspace_run_args(workspace_name: &str) -> Vec<String> {
+    vec![
+        "run".to_string(),
+        "--workspace".to_string(),
+        workspace_name.to_string(),
+    ]
+}
+
 // ============================================================
 // macOS (launchd)
 // ============================================================
 
 #[cfg(target_os = "macos")]
-const LABEL: &str = "com.worktree-gc.daily";
+const LEGACY_LABEL: &str = "com.worktree-gc.daily";
 
 #[cfg(target_os = "macos")]
-fn plist_path() -> Result<PathBuf> {
+fn schedule_label(schedule_name: &str) -> Result<String> {
+    validate_schedule_name(schedule_name)?;
+    Ok(format!("com.worktree-gc.{schedule_name}"))
+}
+
+#[cfg(target_os = "macos")]
+fn launch_agents_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("Cannot determine home directory")?;
-    Ok(home
-        .join("Library/LaunchAgents")
-        .join(format!("{LABEL}.plist")))
+    Ok(home.join("Library/LaunchAgents"))
+}
+
+#[cfg(target_os = "macos")]
+fn plist_path(schedule_name: &str) -> Result<PathBuf> {
+    Ok(launch_agents_dir()?.join(format!("{}.plist", schedule_label(schedule_name)?)))
+}
+
+#[cfg(target_os = "macos")]
+fn legacy_plist_path() -> Result<PathBuf> {
+    Ok(launch_agents_dir()?.join(format!("{LEGACY_LABEL}.plist")))
 }
 
 #[cfg(target_os = "macos")]
@@ -27,70 +61,59 @@ fn log_dir() -> Result<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn install(scan_dir: &str, hour: u8, minute: u8) -> Result<()> {
+pub fn install_workspace(
+    schedule_name: &str,
+    workspace_name: &str,
+    hour: u8,
+    minute: u8,
+) -> Result<()> {
+    validate_registration_name("workspace", workspace_name)?;
+    install_with_args(
+        schedule_name,
+        workspace_run_args(workspace_name),
+        hour,
+        minute,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn install_with_args(
+    schedule_name: &str,
+    run_args: Vec<String>,
+    hour: u8,
+    minute: u8,
+) -> Result<()> {
     let exe = env::current_exe().context("Cannot determine binary path")?;
     let exe_str = exe.to_string_lossy();
-    let plist = plist_path()?;
+    let label = schedule_label(schedule_name)?;
+    let plist = plist_path(schedule_name)?;
     let log_dir = log_dir()?;
-    let log_file = log_dir.join("gc.jsonl");
-    let stdout_log = log_dir.join("launchd-stdout.log");
-    let stderr_log = log_dir.join("launchd-stderr.log");
-
-    // Capture current PATH so launchd can find git/gh
+    let stdout_log = log_dir.join(format!("{schedule_name}-launchd-stdout.log"));
+    let stderr_log = log_dir.join(format!("{schedule_name}-launchd-stderr.log"));
     let current_path = env::var("PATH").unwrap_or_default();
 
     fs::create_dir_all(plist.parent().unwrap())?;
     fs::create_dir_all(&log_dir)?;
 
-    // Unload first if already installed
+    if schedule_name == DEFAULT_SCHEDULE_NAME {
+        remove_legacy_launchd_schedule()?;
+    }
+
     if plist.exists() {
         let _ = Command::new("launchctl")
             .args(["unload", &plist.to_string_lossy()])
             .output();
     }
 
-    let content = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>{LABEL}</string>
-
-    <key>ProgramArguments</key>
-    <array>
-        <string>{exe_str}</string>
-        <string>run</string>
-        <string>--dir</string>
-        <string>{scan_dir}</string>
-        <string>--log-file</string>
-        <string>{log_file}</string>
-    </array>
-
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>{current_path}</string>
-    </dict>
-
-    <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>
-        <integer>{hour}</integer>
-        <key>Minute</key>
-        <integer>{minute}</integer>
-    </dict>
-
-    <key>StandardOutPath</key>
-    <string>{stdout_log}</string>
-    <key>StandardErrorPath</key>
-    <string>{stderr_log}</string>
-</dict>
-</plist>
-"#,
-        log_file = log_file.display(),
-        stdout_log = stdout_log.display(),
-        stderr_log = stderr_log.display(),
+    let content = render_launchd_plist(
+        &label,
+        &exe_str,
+        &run_args,
+        &current_path,
+        &stdout_log.to_string_lossy(),
+        &stderr_log.to_string_lossy(),
+        hour,
+        minute,
     );
 
     fs::write(&plist, &content).with_context(|| format!("Failed to write {}", plist.display()))?;
@@ -108,82 +131,177 @@ pub fn install(scan_dir: &str, hour: u8, minute: u8) -> Result<()> {
     }
 
     println!("✓ Schedule installed (launchd)");
+    println!("  Name:     {schedule_name}");
     println!("  Plist:    {}", plist.display());
     println!("  Binary:   {exe_str}");
-    println!("  Scan dir: {scan_dir}");
     println!("  Time:     {hour:02}:{minute:02} daily");
-    println!("  Log:      {}", log_file.display());
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
-pub fn uninstall() -> Result<()> {
-    let plist = plist_path()?;
-    if !plist.exists() {
-        println!("No schedule installed (plist not found)");
-        return Ok(());
+fn render_launchd_plist(
+    label: &str,
+    exe: &str,
+    run_args: &[String],
+    path: &str,
+    stdout_log: &str,
+    stderr_log: &str,
+    hour: u8,
+    minute: u8,
+) -> String {
+    let mut program_arguments = format!("        <string>{exe}</string>\n");
+    for arg in run_args {
+        program_arguments.push_str(&format!("        <string>{arg}</string>\n"));
+    }
+
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{label}</string>
+
+    <key>ProgramArguments</key>
+    <array>
+{program_arguments}    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>{path}</string>
+    </dict>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>{hour}</integer>
+        <key>Minute</key>
+        <integer>{minute}</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>{stdout_log}</string>
+    <key>StandardErrorPath</key>
+    <string>{stderr_log}</string>
+</dict>
+</plist>
+"#
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn remove_legacy_launchd_schedule() -> Result<bool> {
+    let legacy = legacy_plist_path()?;
+    if !legacy.exists() {
+        return Ok(false);
     }
 
     let output = Command::new("launchctl")
-        .args(["unload", &plist.to_string_lossy()])
-        .output()
-        .context("Failed to run launchctl unload")?;
-
-    if !output.status.success() {
-        warn!(
-            "launchctl unload warning: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        .args(["unload", &legacy.to_string_lossy()])
+        .output();
+    if let Ok(output) = output {
+        if !output.status.success() {
+            warn!(
+                "launchctl unload warning: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
     }
 
-    fs::remove_file(&plist).with_context(|| format!("Failed to remove {}", plist.display()))?;
+    fs::remove_file(&legacy).with_context(|| format!("Failed to remove {}", legacy.display()))?;
+    Ok(true)
+}
 
-    println!("✓ Schedule removed");
-    println!("  Deleted: {}", plist.display());
+#[cfg(target_os = "macos")]
+pub fn uninstall(schedule_name: &str) -> Result<()> {
+    let plist = plist_path(schedule_name)?;
+    let mut removed = false;
+
+    if plist.exists() {
+        let output = Command::new("launchctl")
+            .args(["unload", &plist.to_string_lossy()])
+            .output()
+            .context("Failed to run launchctl unload")?;
+
+        if !output.status.success() {
+            warn!(
+                "launchctl unload warning: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+
+        fs::remove_file(&plist).with_context(|| format!("Failed to remove {}", plist.display()))?;
+        println!("✓ Schedule removed");
+        println!("  Name:    {schedule_name}");
+        println!("  Deleted: {}", plist.display());
+        removed = true;
+    }
+
+    if schedule_name == DEFAULT_SCHEDULE_NAME && remove_legacy_launchd_schedule()? {
+        println!("✓ Legacy schedule removed");
+        removed = true;
+    }
+
+    if !removed {
+        println!(
+            "No schedule installed (plist not found: {})",
+            plist.display()
+        );
+    }
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
-pub fn print_config() -> Result<()> {
-    let plist = plist_path()?;
+pub fn print_config(schedule_names: &[String]) -> Result<()> {
     println!("Schedule configuration:");
     println!("  Scheduler: launchd");
 
-    if !plist.exists() {
-        println!("  Status:    not installed");
-        println!("  Plist:     {}", plist.display());
-        return Ok(());
-    }
-
+    let names = printable_schedule_names(schedule_names);
     let output = Command::new("launchctl")
         .args(["list"])
         .output()
         .context("Failed to run launchctl list")?;
-
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let loaded = stdout.lines().any(|l| l.contains(LABEL));
 
-    println!(
-        "  Status:    {}",
-        if loaded {
-            "active"
-        } else {
-            "installed but not loaded"
+    for name in names {
+        let label = schedule_label(&name)?;
+        let plist = plist_path(&name)?;
+        if !plist.exists() {
+            println!("  {name}: not installed");
+            println!("    Plist: {}", plist.display());
+            continue;
         }
-    );
-    println!("  Plist:     {}", plist.display());
 
-    let content = fs::read_to_string(&plist)?;
-    if let (Some(h), Some(m)) = (
-        extract_plist_integer(&content, "Hour"),
-        extract_plist_integer(&content, "Minute"),
-    ) {
-        println!("  Time:      {h:02}:{m:02} daily");
+        let loaded = stdout.lines().any(|line| line.contains(&label));
+        println!(
+            "  {name}: {}",
+            if loaded {
+                "active"
+            } else {
+                "installed but not loaded"
+            }
+        );
+        println!("    Plist: {}", plist.display());
+
+        let content = fs::read_to_string(&plist)?;
+        if let (Some(h), Some(m)) = (
+            extract_plist_integer(&content, "Hour"),
+            extract_plist_integer(&content, "Minute"),
+        ) {
+            println!("    Time:  {h:02}:{m:02} daily");
+        }
+        if !loaded {
+            println!("    Activate: launchctl load {}", plist.display());
+        }
     }
 
-    if !loaded {
-        println!("  Activate:  launchctl load {}", plist.display());
+    let legacy = legacy_plist_path()?;
+    if legacy.exists() {
+        println!("  legacy daily: installed");
+        println!("    Plist: {}", legacy.display());
     }
+
     Ok(())
 }
 
@@ -224,59 +342,75 @@ fn log_dir() -> Result<PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
-fn service_path() -> Result<PathBuf> {
+fn unit_stem(schedule_name: &str) -> Result<String> {
+    validate_schedule_name(schedule_name)?;
+    Ok(format!("worktree-gc-{schedule_name}"))
+}
+
+#[cfg(target_os = "linux")]
+fn service_path(schedule_name: &str) -> Result<PathBuf> {
+    Ok(systemd_dir()?.join(format!("{}.service", unit_stem(schedule_name)?)))
+}
+
+#[cfg(target_os = "linux")]
+fn timer_path(schedule_name: &str) -> Result<PathBuf> {
+    Ok(systemd_dir()?.join(format!("{}.timer", unit_stem(schedule_name)?)))
+}
+
+#[cfg(target_os = "linux")]
+fn legacy_service_path() -> Result<PathBuf> {
     Ok(systemd_dir()?.join("worktree-gc.service"))
 }
 
 #[cfg(target_os = "linux")]
-fn timer_path() -> Result<PathBuf> {
+fn legacy_timer_path() -> Result<PathBuf> {
     Ok(systemd_dir()?.join("worktree-gc.timer"))
 }
 
 #[cfg(target_os = "linux")]
-pub fn install(scan_dir: &str, hour: u8, minute: u8) -> Result<()> {
+pub fn install_workspace(
+    schedule_name: &str,
+    workspace_name: &str,
+    hour: u8,
+    minute: u8,
+) -> Result<()> {
+    validate_registration_name("workspace", workspace_name)?;
+    install_with_args(
+        schedule_name,
+        workspace_run_args(workspace_name),
+        hour,
+        minute,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn install_with_args(
+    schedule_name: &str,
+    run_args: Vec<String>,
+    hour: u8,
+    minute: u8,
+) -> Result<()> {
     let exe = env::current_exe().context("Cannot determine binary path")?;
     let exe_str = exe.to_string_lossy();
-    let svc = service_path()?;
-    let tmr = timer_path()?;
-    let log_dir = log_dir()?;
-    let log_file = log_dir.join("gc.jsonl");
+    let stem = unit_stem(schedule_name)?;
+    let svc = service_path(schedule_name)?;
+    let tmr = timer_path(schedule_name)?;
 
     fs::create_dir_all(svc.parent().unwrap())?;
-    fs::create_dir_all(&log_dir)?;
 
-    // Stop timer if already running
+    if schedule_name == DEFAULT_SCHEDULE_NAME {
+        remove_legacy_systemd_schedule()?;
+    }
+
     let _ = Command::new("systemctl")
-        .args(["--user", "stop", "worktree-gc.timer"])
+        .args(["--user", "stop", &format!("{stem}.timer")])
         .output();
     let _ = Command::new("systemctl")
-        .args(["--user", "disable", "worktree-gc.timer"])
+        .args(["--user", "disable", &format!("{stem}.timer")])
         .output();
 
-    let service_content = format!(
-        "[Unit]\n\
-         Description=Clean up git worktrees whose PRs have been merged\n\
-         \n\
-         [Service]\n\
-         Type=oneshot\n\
-         ExecStart={exe_str} run --dir {scan_dir} --log-file {log_file}\n\
-         \n\
-         [Install]\n\
-         WantedBy=default.target\n",
-        log_file = log_file.display(),
-    );
-
-    let timer_content = format!(
-        "[Unit]\n\
-         Description=Daily cleanup of merged git worktrees\n\
-         \n\
-         [Timer]\n\
-         OnCalendar=*-*-* {hour:02}:{minute:02}:00\n\
-         Persistent=true\n\
-         \n\
-         [Install]\n\
-         WantedBy=timers.target\n",
-    );
+    let service_content = render_systemd_service(schedule_name, &exe_str, &run_args);
+    let timer_content = render_systemd_timer(schedule_name, hour, minute);
 
     fs::write(&svc, &service_content)
         .with_context(|| format!("Failed to write {}", svc.display()))?;
@@ -294,8 +428,9 @@ pub fn install(scan_dir: &str, hour: u8, minute: u8) -> Result<()> {
         );
     }
 
+    let timer_unit = format!("{stem}.timer");
     let output = Command::new("systemctl")
-        .args(["--user", "enable", "--now", "worktree-gc.timer"])
+        .args(["--user", "enable", "--now", &timer_unit])
         .output()
         .context("Failed to enable timer")?;
     if !output.status.success() {
@@ -306,23 +441,69 @@ pub fn install(scan_dir: &str, hour: u8, minute: u8) -> Result<()> {
     }
 
     println!("✓ Schedule installed (systemd)");
+    println!("  Name:     {schedule_name}");
     println!("  Service:  {}", svc.display());
     println!("  Timer:    {}", tmr.display());
     println!("  Binary:   {exe_str}");
-    println!("  Scan dir: {scan_dir}");
     println!("  Time:     {hour:02}:{minute:02} daily");
-    println!("  Log:      {}", log_file.display());
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-pub fn uninstall() -> Result<()> {
-    let svc = service_path()?;
-    let tmr = timer_path()?;
+fn render_systemd_service(schedule_name: &str, exe: &str, run_args: &[String]) -> String {
+    let args = run_args
+        .iter()
+        .map(|arg| quote_systemd_arg(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "[Unit]\n\
+         Description=Clean up merged git worktrees ({schedule_name})\n\
+         \n\
+         [Service]\n\
+         Type=oneshot\n\
+         ExecStart={} {}\n\
+         \n\
+         [Install]\n\
+         WantedBy=default.target\n",
+        quote_systemd_arg(exe),
+        args,
+    )
+}
 
+#[cfg(target_os = "linux")]
+fn render_systemd_timer(schedule_name: &str, hour: u8, minute: u8) -> String {
+    format!(
+        "[Unit]\n\
+         Description=Daily cleanup of merged git worktrees ({schedule_name})\n\
+         \n\
+         [Timer]\n\
+         OnCalendar=*-*-* {hour:02}:{minute:02}:00\n\
+         Persistent=true\n\
+         \n\
+         [Install]\n\
+         WantedBy=timers.target\n",
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn quote_systemd_arg(arg: &str) -> String {
+    if arg
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '='))
+    {
+        return arg.to_string();
+    }
+
+    format!("'{}'", arg.replace('\\', "\\\\").replace('\'', "\\'"))
+}
+
+#[cfg(target_os = "linux")]
+fn remove_legacy_systemd_schedule() -> Result<bool> {
+    let svc = legacy_service_path()?;
+    let tmr = legacy_timer_path()?;
     if !svc.exists() && !tmr.exists() {
-        println!("No schedule installed (unit files not found)");
-        return Ok(());
+        return Ok(false);
     }
 
     let _ = Command::new("systemctl")
@@ -342,54 +523,98 @@ pub fn uninstall() -> Result<()> {
     let _ = Command::new("systemctl")
         .args(["--user", "daemon-reload"])
         .output();
+    Ok(true)
+}
 
-    println!("✓ Schedule removed");
+#[cfg(target_os = "linux")]
+pub fn uninstall(schedule_name: &str) -> Result<()> {
+    let stem = unit_stem(schedule_name)?;
+    let svc = service_path(schedule_name)?;
+    let tmr = timer_path(schedule_name)?;
+    let mut removed = false;
+
+    let _ = Command::new("systemctl")
+        .args(["--user", "stop", &format!("{stem}.timer")])
+        .output();
+    let _ = Command::new("systemctl")
+        .args(["--user", "disable", &format!("{stem}.timer")])
+        .output();
+
     if tmr.exists() {
+        fs::remove_file(&tmr)?;
         println!("  Deleted: {}", tmr.display());
+        removed = true;
     }
     if svc.exists() {
+        fs::remove_file(&svc)?;
         println!("  Deleted: {}", svc.display());
+        removed = true;
+    }
+
+    if schedule_name == DEFAULT_SCHEDULE_NAME && remove_legacy_systemd_schedule()? {
+        println!("✓ Legacy schedule removed");
+        removed = true;
+    }
+
+    let _ = Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .output();
+
+    if removed {
+        println!("✓ Schedule removed");
+        println!("  Name: {schedule_name}");
+    } else {
+        println!("No schedule installed (unit files not found)");
     }
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-pub fn print_config() -> Result<()> {
-    let svc = service_path()?;
-    let tmr = timer_path()?;
+pub fn print_config(schedule_names: &[String]) -> Result<()> {
     println!("Schedule configuration:");
     println!("  Scheduler: systemd");
 
-    if !tmr.exists() {
-        println!("  Status:    not installed");
-        println!("  Service:   {}", svc.display());
-        println!("  Timer:     {}", tmr.display());
-        return Ok(());
-    }
-
-    let output = Command::new("systemctl")
-        .args(["--user", "is-active", "worktree-gc.timer"])
-        .output()
-        .context("Failed to check timer status")?;
-
-    let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    println!("  Status:    {state}");
-    println!("  Service:   {}", svc.display());
-    println!("  Timer:     {}", tmr.display());
-
-    let timer_content = fs::read_to_string(&tmr)?;
-    if let Some(schedule) = extract_systemd_timer_schedule(&timer_content) {
-        println!("  Schedule:  {schedule}");
-    }
-
-    let output = Command::new("systemctl")
-        .args(["--user", "list-timers", "worktree-gc.timer", "--no-pager"])
-        .output();
-    if let Ok(o) = output {
-        let stdout = String::from_utf8_lossy(&o.stdout);
-        for line in stdout.lines().skip(1).take(1) {
-            println!("  Next run:  {line}");
+    for name in printable_schedule_names(schedule_names) {
+        let stem = unit_stem(&name)?;
+        let svc = service_path(&name)?;
+        let tmr = timer_path(&name)?;
+        if !tmr.exists() {
+            println!("  {name}: not installed");
+            println!("    Service: {}", svc.display());
+            println!("    Timer:   {}", tmr.display());
+            continue;
         }
+
+        let timer_unit = format!("{stem}.timer");
+        let output = Command::new("systemctl")
+            .args(["--user", "is-active", &timer_unit])
+            .output()
+            .context("Failed to check timer status")?;
+
+        let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        println!("  {name}: {state}");
+        println!("    Service: {}", svc.display());
+        println!("    Timer:   {}", tmr.display());
+
+        let timer_content = fs::read_to_string(&tmr)?;
+        if let Some(schedule) = extract_systemd_timer_schedule(&timer_content) {
+            println!("    Schedule: {schedule}");
+        }
+
+        let output = Command::new("systemctl")
+            .args(["--user", "list-timers", &timer_unit, "--no-pager"])
+            .output();
+        if let Ok(output) = output {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines().skip(1).take(1) {
+                println!("    Next run: {line}");
+            }
+        }
+    }
+
+    if legacy_timer_path()?.exists() {
+        println!("  legacy daily: installed");
+        println!("    Timer: {}", legacy_timer_path()?.display());
     }
 
     Ok(())
@@ -408,207 +633,81 @@ fn extract_systemd_timer_schedule(content: &str) -> Option<String> {
 // ============================================================
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub fn install(_scan_dir: &str, _hour: u8, _minute: u8) -> Result<()> {
+pub fn install_workspace(
+    _schedule_name: &str,
+    _workspace_name: &str,
+    _hour: u8,
+    _minute: u8,
+) -> Result<()> {
     bail!("Scheduled execution is not supported on this platform. Supported: macOS (launchd), Linux (systemd).");
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub fn uninstall() -> Result<()> {
+pub fn uninstall(_schedule_name: &str) -> Result<()> {
     bail!("Scheduled execution is not supported on this platform.");
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub fn print_config() -> Result<()> {
+pub fn print_config(_schedule_names: &[String]) -> Result<()> {
     println!("Schedule configuration:");
     println!("  Scheduler: unsupported");
     println!("  Status:    not supported on this platform");
     Ok(())
 }
 
-// ============================================================
-// Interactive wizard
-// ============================================================
-
-fn is_installed() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        plist_path().map(|p| p.exists()).unwrap_or(false)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        timer_path().map(|p| p.exists()).unwrap_or(false)
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        false
-    }
-}
-
-fn scheduler_name() -> &'static str {
-    #[cfg(target_os = "macos")]
-    {
-        "launchd"
-    }
-    #[cfg(target_os = "linux")]
-    {
-        "systemd"
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        "unsupported"
-    }
-}
-
-pub fn interactive_wizard(current_dir: &str) -> Result<()> {
-    use console::style;
-    use dialoguer::{Confirm, Select};
-
-    println!();
-    println!("  {}", style("⏰ worktree-gc scheduler").bold());
-    println!(
-        "  {}",
-        style(format!(
-            "   Platform: {} ({})",
-            std::env::consts::OS,
-            scheduler_name()
-        ))
-        .dim()
-    );
-    println!();
-
-    let installed = is_installed();
-
-    if installed {
-        // Already installed — show status and offer actions
-        print_config()?;
-        println!();
-
-        let choices = vec![
-            "Update schedule (change time or directory)",
-            "Remove schedule",
-            "Cancel",
-        ];
-        let selection = Select::new()
-            .with_prompt("What would you like to do?")
-            .items(&choices)
-            .default(0)
-            .interact()?;
-
-        match selection {
-            0 => {
-                // Update — ask for new settings and reinstall
-                let (dir, hour, minute) = prompt_install_settings(current_dir)?;
-                install(&dir, hour, minute)
-            }
-            1 => {
-                let confirm = Confirm::new()
-                    .with_prompt("Remove the daily schedule?")
-                    .default(false)
-                    .interact()?;
-                if confirm {
-                    uninstall()
-                } else {
-                    println!("Cancelled.");
-                    Ok(())
-                }
-            }
-            _ => {
-                println!("Cancelled.");
-                Ok(())
-            }
-        }
-    } else {
-        // Not installed — offer to set up
-        println!("  No schedule is currently configured.");
-        println!("  This wizard will set up daily automatic cleanup of merged worktrees.");
-        println!();
-
-        let confirm = Confirm::new()
-            .with_prompt("Set up daily automatic execution?")
-            .default(true)
-            .interact()?;
-
-        if !confirm {
-            println!("Cancelled.");
-            return Ok(());
-        }
-
-        let (dir, hour, minute) = prompt_install_settings(current_dir)?;
-
-        println!();
-        println!("  {}", style("Summary:").bold());
-        println!("  Scan directory: {}", style(&dir).cyan());
-        println!(
-            "  Run daily at:   {}",
-            style(format!("{hour:02}:{minute:02}")).cyan()
-        );
-        println!("  Scheduler:      {}", style(scheduler_name()).cyan());
-        println!();
-
-        let confirm = Confirm::new()
-            .with_prompt("Install?")
-            .default(true)
-            .interact()?;
-
-        if confirm {
-            install(&dir, hour, minute)
-        } else {
-            println!("Cancelled.");
-            Ok(())
-        }
-    }
-}
-
-fn prompt_install_settings(current_dir: &str) -> Result<(String, u8, u8)> {
-    use dialoguer::Input;
-
-    let dir: String = Input::new()
-        .with_prompt("Directory to scan")
-        .default(current_dir.to_string())
-        .interact_text()?;
-
-    let time: String = Input::new()
-        .with_prompt("What time should it run? (HH:MM)")
-        .default("09:00".to_string())
-        .validate_with(|input: &String| -> std::result::Result<(), &str> {
-            if parse_daily_time(input).is_some() {
-                Ok(())
-            } else {
-                Err("Must be in HH:MM format, for example 09:00 or 18:30")
-            }
-        })
-        .interact_text()?;
-
-    let (hour, minute) = parse_daily_time(&time).expect("validated daily time");
-
-    Ok((dir, hour, minute))
-}
-
-fn parse_daily_time(input: &str) -> Option<(u8, u8)> {
-    let (hour, minute) = input.split_once(':')?;
-    if hour.len() != 2 || minute.len() != 2 {
-        return None;
+fn printable_schedule_names(schedule_names: &[String]) -> Vec<String> {
+    if schedule_names.is_empty() {
+        return vec![DEFAULT_SCHEDULE_NAME.to_string()];
     }
 
-    let hour = hour.parse::<u8>().ok()?;
-    let minute = minute.parse::<u8>().ok()?;
-
-    if hour < 24 && minute < 60 {
-        Some((hour, minute))
-    } else {
-        None
-    }
+    let mut names = schedule_names.to_vec();
+    names.sort();
+    names.dedup();
+    names
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn test_parse_daily_time() {
-        assert_eq!(super::parse_daily_time("09:00"), Some((9, 0)));
-        assert_eq!(super::parse_daily_time("18:30"), Some((18, 30)));
-        assert_eq!(super::parse_daily_time("24:00"), None);
-        assert_eq!(super::parse_daily_time("09:60"), None);
-        assert_eq!(super::parse_daily_time("9:00"), None);
+    fn test_validate_schedule_name() {
+        assert!(super::validate_schedule_name("default").is_ok());
+        assert!(super::validate_schedule_name("team-a_1").is_ok());
+        assert!(super::validate_schedule_name("Daily").is_err());
+        assert!(super::validate_schedule_name("daily").is_err());
+        assert!(super::validate_schedule_name("../daily").is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_render_launchd_plist_uses_workspace_argument() {
+        let args = super::workspace_run_args("personal");
+        let content = super::render_launchd_plist(
+            "com.worktree-gc.personal",
+            "/usr/local/bin/worktree-gc",
+            &args,
+            "/usr/bin:/bin",
+            "/tmp/stdout.log",
+            "/tmp/stderr.log",
+            9,
+            30,
+        );
+
+        assert!(content.contains("<string>com.worktree-gc.personal</string>"));
+        assert!(content.contains("<string>--workspace</string>"));
+        assert!(content.contains("<string>personal</string>"));
+        assert!(content.contains("<integer>9</integer>"));
+        assert!(content.contains("<integer>30</integer>"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_render_systemd_service_uses_workspace_argument() {
+        let args = super::workspace_run_args("personal");
+        let content =
+            super::render_systemd_service("personal", "/usr/local/bin/worktree-gc", &args);
+
+        assert!(content.contains("Description=Clean up merged git worktrees (personal)"));
+        assert!(content.contains("ExecStart=/usr/local/bin/worktree-gc run --workspace personal"));
     }
 
     #[cfg(target_os = "linux")]

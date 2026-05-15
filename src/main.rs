@@ -15,7 +15,7 @@ mod scheduler;
 mod update;
 
 /// Automatically clean up git worktrees whose pull requests have been merged.
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(name = "worktree-gc", version, about)]
 struct Cli {
     #[command(subcommand)]
@@ -36,6 +36,10 @@ struct Cli {
     /// Log file path (JSONL format)
     #[arg(long, env = "WORKTREE_GC_LOG", default_value_t = default_log_file(), global = true)]
     log_file: String,
+
+    /// Named workspace to use from the runtime configuration
+    #[arg(long, global = true)]
+    workspace: Option<String>,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -51,6 +55,11 @@ enum Commands {
     Schedule {
         #[command(subcommand)]
         action: Option<ScheduleAction>,
+    },
+    /// Manage named workspaces (interactive wizard if no subcommand given)
+    Workspace {
+        #[command(subcommand)]
+        action: Option<WorkspaceAction>,
     },
     /// Show execution history from the JSONL log
     History {
@@ -119,6 +128,9 @@ impl FromStr for HistoryLast {
 enum ScheduleAction {
     /// Install daily scheduled execution (launchd on macOS, systemd on Linux)
     Install {
+        /// Schedule name
+        #[arg(long, default_value = "default")]
+        name: String,
         /// Hour to run (0-23)
         #[arg(long, default_value_t = 9)]
         hour: u8,
@@ -127,7 +139,35 @@ enum ScheduleAction {
         minute: u8,
     },
     /// Remove scheduled execution
-    Uninstall,
+    Uninstall {
+        /// Schedule name
+        #[arg(long, default_value = "default")]
+        name: String,
+        /// Remove all registered schedules
+        #[arg(long)]
+        all: bool,
+    },
+    /// List registered schedules
+    List,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum WorkspaceAction {
+    /// Add or update a named workspace
+    Add {
+        /// Workspace name
+        name: String,
+        /// Directory to scan for git repositories
+        #[arg(short, long)]
+        dir: String,
+    },
+    /// Remove a named workspace
+    Remove {
+        /// Workspace name
+        name: String,
+    },
+    /// List registered workspaces
+    List,
 }
 
 fn default_dir() -> String {
@@ -146,10 +186,95 @@ fn default_log_file() -> String {
         .unwrap_or_else(|| "gc.jsonl".to_string())
 }
 
+pub(crate) fn validate_registration_name(kind: &str, name: &str) -> Result<()> {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        bail!("{kind} name cannot be empty");
+    };
+
+    if name.len() > 31 {
+        bail!("{kind} name must be 31 characters or fewer");
+    }
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+        bail!("{kind} name must start with a lowercase letter or digit");
+    }
+    if chars.any(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')) {
+        bail!("{kind} name may only contain lowercase letters, digits, '-' and '_'");
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 struct RuntimeConfigFile {
     dir: Option<String>,
     log_file: Option<String>,
+    #[serde(default)]
+    workspaces: Vec<WorkspaceConfig>,
+    #[serde(default)]
+    schedules: Vec<ScheduleConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+struct WorkspaceConfig {
+    name: String,
+    dir: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    log_file: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+struct ScheduleConfig {
+    name: String,
+    workspace: String,
+    hour: u8,
+    minute: u8,
+}
+
+impl RuntimeConfigFile {
+    fn find_workspace(&self, name: &str) -> Option<&WorkspaceConfig> {
+        self.workspaces
+            .iter()
+            .find(|workspace| workspace.name == name)
+    }
+
+    fn upsert_workspace(&mut self, workspace: WorkspaceConfig) {
+        if let Some(existing) = self
+            .workspaces
+            .iter_mut()
+            .find(|existing| existing.name == workspace.name)
+        {
+            *existing = workspace;
+        } else {
+            self.workspaces.push(workspace);
+            self.workspaces.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+    }
+
+    fn remove_workspace(&mut self, name: &str) -> bool {
+        let before = self.workspaces.len();
+        self.workspaces.retain(|workspace| workspace.name != name);
+        before != self.workspaces.len()
+    }
+
+    fn upsert_schedule(&mut self, schedule: ScheduleConfig) {
+        if let Some(existing) = self
+            .schedules
+            .iter_mut()
+            .find(|existing| existing.name == schedule.name)
+        {
+            *existing = schedule;
+        } else {
+            self.schedules.push(schedule);
+            self.schedules.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+    }
+
+    fn remove_schedule(&mut self, name: &str) -> bool {
+        let before = self.schedules.len();
+        self.schedules.retain(|schedule| schedule.name != name);
+        before != self.schedules.len()
+    }
 }
 
 fn runtime_config_path() -> Result<PathBuf> {
@@ -172,7 +297,11 @@ fn load_runtime_config() -> Result<RuntimeConfigFile> {
 
 fn save_runtime_config(config: &RuntimeConfigFile) -> Result<()> {
     let path = runtime_config_path()?;
-    if config.dir.is_none() && config.log_file.is_none() {
+    if config.dir.is_none()
+        && config.log_file.is_none()
+        && config.workspaces.is_empty()
+        && config.schedules.is_empty()
+    {
         if path.exists() {
             fs::remove_file(&path).with_context(|| format!("Cannot remove {}", path.display()))?;
         }
@@ -744,16 +873,50 @@ fn has_cli_option(args: &[OsString], short: Option<&str>, long: &str) -> bool {
 
 fn apply_saved_runtime_config(cli: &mut Cli, args: &[OsString]) -> Result<()> {
     let config = load_runtime_config()?;
+    apply_runtime_config_values(
+        cli,
+        args,
+        &config,
+        std::env::var_os("WORKTREE_GC_DIR").is_some(),
+        std::env::var_os("WORKTREE_GC_LOG").is_some(),
+    )
+}
 
-    if !has_cli_option(args, Some("-d"), "--dir") && std::env::var_os("WORKTREE_GC_DIR").is_none() {
-        if let Some(dir) = config.dir {
-            cli.dir = dir;
+fn apply_runtime_config_values(
+    cli: &mut Cli,
+    args: &[OsString],
+    config: &RuntimeConfigFile,
+    env_dir_set: bool,
+    env_log_set: bool,
+) -> Result<()> {
+    let dir_explicit = has_cli_option(args, Some("-d"), "--dir") || env_dir_set;
+    let log_explicit = has_cli_option(args, None, "--log-file") || env_log_set;
+    let workspace = if let Some(name) = cli.workspace.as_deref() {
+        validate_registration_name("workspace", name)?;
+        Some(
+            config
+                .find_workspace(name)
+                .with_context(|| format!("Workspace not found: {name}"))?,
+        )
+    } else {
+        None
+    };
+
+    if !dir_explicit {
+        if let Some(workspace) = workspace {
+            cli.dir = workspace.dir.clone();
+        } else if let Some(dir) = &config.dir {
+            cli.dir = dir.clone();
         }
     }
 
-    if !has_cli_option(args, None, "--log-file") && std::env::var_os("WORKTREE_GC_LOG").is_none() {
-        if let Some(log_file) = config.log_file {
-            cli.log_file = log_file;
+    if !log_explicit {
+        if let Some(workspace_log_file) =
+            workspace.and_then(|workspace| workspace.log_file.as_ref())
+        {
+            cli.log_file = workspace_log_file.clone();
+        } else if let Some(log_file) = &config.log_file {
+            cli.log_file = log_file.clone();
         }
     }
 
@@ -778,9 +941,10 @@ fn interactive_command_menu(dry_run: bool) -> Result<Option<Commands>> {
     };
     let choices = vec![
         run_label,
-        "Show config",
         "Manage schedule",
+        "Manage workspaces",
         "Show history",
+        "Show config",
         "Cancel",
     ];
 
@@ -792,13 +956,14 @@ fn interactive_command_menu(dry_run: bool) -> Result<Option<Commands>> {
 
     match selection {
         0 => Ok(Some(Commands::Run)),
-        1 => Ok(Some(Commands::Config { action: None })),
-        2 => Ok(Some(Commands::Schedule { action: None })),
+        1 => Ok(Some(Commands::Schedule { action: None })),
+        2 => Ok(Some(Commands::Workspace { action: None })),
         3 => Ok(Some(Commands::History {
             last: HistoryLast::Count(10),
             action: None,
             repo: None,
         })),
+        4 => Ok(Some(Commands::Config { action: None })),
         _ => {
             println!("Cancelled.");
             Ok(None)
@@ -809,11 +974,16 @@ fn interactive_command_menu(dry_run: bool) -> Result<Option<Commands>> {
 fn execute_command(cli: &Cli, command: Commands, raw_args: &[OsString]) -> Result<()> {
     match command {
         Commands::Schedule { action } => match action {
-            Some(ScheduleAction::Install { hour, minute }) => {
-                scheduler::install(&cli.dir, hour, minute)
+            Some(ScheduleAction::Install { name, hour, minute }) => {
+                install_schedule(cli, &name, hour, minute, raw_args)
             }
-            Some(ScheduleAction::Uninstall) => scheduler::uninstall(),
-            None => scheduler::interactive_wizard(&cli.dir),
+            Some(ScheduleAction::Uninstall { name, all }) => uninstall_schedule(&name, all),
+            Some(ScheduleAction::List) => list_schedules(),
+            None => interactive_schedule_wizard(cli),
+        },
+        Commands::Workspace { action } => match action {
+            Some(action) => execute_workspace_action(cli, action, raw_args),
+            None => interactive_workspace_wizard(cli),
         },
         Commands::Config { action } => match action {
             Some(ConfigAction::Set) => set_runtime_config(cli, raw_args),
@@ -824,8 +994,56 @@ fn execute_command(cli: &Cli, command: Commands, raw_args: &[OsString]) -> Resul
             show_history(&cli.log_file, last, action.as_deref(), repo.as_deref())
         }
         Commands::Update { check } => update::run(check),
-        Commands::Run => run_gc(cli),
+        Commands::Run => run_gc_from_command(cli, raw_args),
     }
+}
+
+fn run_gc_from_command(cli: &Cli, raw_args: &[OsString]) -> Result<()> {
+    if should_open_interactive_menu(raw_args) && cli.workspace.is_none() {
+        let mut cli = cli.clone();
+        prompt_run_workspace_if_needed(&mut cli)?;
+        return run_gc(&cli);
+    }
+
+    run_gc(cli)
+}
+
+fn prompt_run_workspace_if_needed(cli: &mut Cli) -> Result<()> {
+    use dialoguer::Select;
+
+    let config = load_runtime_config()?;
+    if config.workspaces.len() <= 1 {
+        return Ok(());
+    }
+
+    let workspace_labels: Vec<String> = config
+        .workspaces
+        .iter()
+        .map(|workspace| format!("{} ({})", workspace.name, workspace.dir))
+        .collect();
+    let selection = Select::new()
+        .with_prompt("Select workspace to run cleanup")
+        .items(&workspace_labels)
+        .default(0)
+        .interact()?;
+    let workspace = &config.workspaces[selection];
+
+    cli.workspace = Some(workspace.name.clone());
+    cli.dir = workspace.dir.clone();
+    if let Some(log_file) = &workspace.log_file {
+        cli.log_file = log_file.clone();
+    } else if let Some(log_file) = &config.log_file {
+        cli.log_file = log_file.clone();
+    }
+
+    println!();
+    println!("  {}", style("Run cleanup").bold());
+    println!("  Workspace: {}", style(&workspace.name).cyan());
+    println!("  Directory: {}", style(&cli.dir).cyan());
+    println!("  Log file:  {}", cli.log_file);
+    println!();
+
+    Ok(())
 }
 
 fn show_config(cli: &Cli) -> Result<()> {
@@ -853,8 +1071,12 @@ fn show_config(cli: &Cli) -> Result<()> {
         saved.log_file.as_deref().unwrap_or("(not set)")
     );
     println!();
+    print_registered_workspaces(&saved);
+    println!();
+    print_registered_schedules(&saved);
+    println!();
 
-    scheduler::print_config()
+    scheduler::print_config(&configured_schedule_names(&saved))
 }
 
 fn set_runtime_config(cli: &Cli, raw_args: &[OsString]) -> Result<()> {
@@ -909,6 +1131,769 @@ fn unset_runtime_config(field: ConfigField) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn execute_workspace_action(
+    cli: &Cli,
+    action: WorkspaceAction,
+    raw_args: &[OsString],
+) -> Result<()> {
+    match action {
+        WorkspaceAction::Add { name, dir } => {
+            let log_file = if has_cli_option(raw_args, None, "--log-file") {
+                Some(cli.log_file.clone())
+            } else {
+                None
+            };
+            add_workspace(&name, &dir, log_file)
+        }
+        WorkspaceAction::Remove { name } => remove_workspace(&name),
+        WorkspaceAction::List => list_workspaces(),
+    }
+}
+
+fn add_workspace(name: &str, dir: &str, log_file: Option<String>) -> Result<()> {
+    validate_registration_name("workspace", name)?;
+    let dir_path = PathBuf::from(dir);
+    if !dir_path.is_dir() {
+        bail!("Workspace directory does not exist: {}", dir_path.display());
+    }
+
+    let mut config = load_runtime_config()?;
+    config.upsert_workspace(WorkspaceConfig {
+        name: name.to_string(),
+        dir: dir.to_string(),
+        log_file,
+    });
+    save_runtime_config(&config)?;
+
+    println!("Saved workspace:");
+    println!("  Name:   {name}");
+    println!("  Dir:    {dir}");
+    if let Some(workspace) = config.find_workspace(name) {
+        println!("  Log:    {}", workspace_log_display(workspace, &config));
+    }
+    println!("  Config: {}", runtime_config_path()?.display());
+    Ok(())
+}
+
+fn remove_workspace(name: &str) -> Result<()> {
+    validate_registration_name("workspace", name)?;
+    let mut config = load_runtime_config()?;
+    let referencing_schedules: Vec<_> = config
+        .schedules
+        .iter()
+        .filter(|schedule| schedule.workspace == name)
+        .map(|schedule| schedule.name.clone())
+        .collect();
+
+    if !referencing_schedules.is_empty() {
+        bail!(
+            "Workspace '{name}' is used by schedule(s): {}. Remove those schedules first.",
+            referencing_schedules.join(", ")
+        );
+    }
+
+    if !config.remove_workspace(name) {
+        bail!("Workspace not found: {name}");
+    }
+
+    save_runtime_config(&config)?;
+    println!("Removed workspace: {name}");
+    Ok(())
+}
+
+fn list_workspaces() -> Result<()> {
+    let config = load_runtime_config()?;
+    print_registered_workspaces(&config);
+    Ok(())
+}
+
+fn interactive_workspace_wizard(cli: &Cli) -> Result<()> {
+    use dialoguer::Select;
+
+    let config = load_runtime_config()?;
+    println!();
+    println!("  {}", style("worktree-gc workspaces").bold());
+    println!("  {}", style("Manage named scan directories").dim());
+    println!();
+    print_registered_workspaces(&config);
+    println!();
+
+    let choices = vec![
+        "Add workspace",
+        "Update workspace",
+        "Remove workspace",
+        "List workspaces",
+        "Cancel",
+    ];
+    let default_choice = if config.workspaces.is_empty() { 0 } else { 1 };
+    let selection = Select::new()
+        .with_prompt("What would you like to do?")
+        .items(&choices)
+        .default(default_choice)
+        .interact()?;
+
+    match selection {
+        0 => add_workspace_interactive(cli, &config),
+        1 => update_workspace_interactive(cli, &config),
+        2 => remove_workspace_interactive(&config),
+        3 => {
+            print_registered_workspaces(&config);
+            Ok(())
+        }
+        _ => {
+            println!("Cancelled.");
+            Ok(())
+        }
+    }
+}
+
+fn add_workspace_interactive(cli: &Cli, config: &RuntimeConfigFile) -> Result<()> {
+    use dialoguer::{Confirm, Input};
+
+    let name: String = Input::new()
+        .with_prompt("Workspace name")
+        .default(default_new_workspace_name(config))
+        .validate_with(|input: &String| -> std::result::Result<(), String> {
+            validate_registration_name("workspace", input).map_err(|err| err.to_string())?;
+            Ok(())
+        })
+        .interact_text()?;
+
+    let default_log_file = cli.log_file.clone();
+    let (dir, log_file) = prompt_workspace_settings(cli, None, &default_log_file)?;
+    print_workspace_summary(&name, &dir, log_file.as_deref(), &default_log_file);
+
+    if !Confirm::new()
+        .with_prompt("Save this workspace?")
+        .default(true)
+        .interact()?
+    {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    add_workspace(&name, &dir, log_file)
+}
+
+fn update_workspace_interactive(cli: &Cli, config: &RuntimeConfigFile) -> Result<()> {
+    use dialoguer::{Confirm, Select};
+
+    if config.workspaces.is_empty() {
+        println!("No registered workspaces to update.");
+        return Ok(());
+    }
+
+    let workspace_labels: Vec<String> = config
+        .workspaces
+        .iter()
+        .map(|workspace| format!("{} ({})", workspace.name, workspace.dir))
+        .collect();
+    let selection = Select::new()
+        .with_prompt("Select a workspace to update")
+        .items(&workspace_labels)
+        .default(0)
+        .interact()?;
+    let workspace = config.workspaces[selection].clone();
+
+    let default_log_file = cli.log_file.clone();
+    let (dir, log_file) = prompt_workspace_settings_for_existing(&workspace, &default_log_file)?;
+    print_workspace_summary(
+        &workspace.name,
+        &dir,
+        log_file.as_deref(),
+        &default_log_file,
+    );
+
+    if !Confirm::new()
+        .with_prompt("Update this workspace?")
+        .default(true)
+        .interact()?
+    {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    add_workspace(&workspace.name, &dir, log_file)
+}
+
+fn remove_workspace_interactive(config: &RuntimeConfigFile) -> Result<()> {
+    use dialoguer::{Confirm, Select};
+
+    if config.workspaces.is_empty() {
+        println!("No registered workspaces to remove.");
+        return Ok(());
+    }
+
+    let workspace_labels: Vec<String> = config
+        .workspaces
+        .iter()
+        .map(|workspace| format!("{} ({})", workspace.name, workspace.dir))
+        .collect();
+    let selection = Select::new()
+        .with_prompt("Select a workspace to remove")
+        .items(&workspace_labels)
+        .default(0)
+        .interact()?;
+    let workspace_name = config.workspaces[selection].name.clone();
+
+    if !Confirm::new()
+        .with_prompt(format!("Remove workspace '{workspace_name}'?"))
+        .default(false)
+        .interact()?
+    {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    remove_workspace(&workspace_name)
+}
+
+fn prompt_workspace_settings(
+    cli: &Cli,
+    current: Option<&WorkspaceConfig>,
+    default_effective_log_file: &str,
+) -> Result<(String, Option<String>)> {
+    let fallback_dir = current
+        .map(|workspace| workspace.dir.clone())
+        .unwrap_or_else(|| cli.dir.clone());
+    let fallback_log = current
+        .and_then(|workspace| workspace.log_file.clone())
+        .unwrap_or_default();
+    prompt_workspace_settings_with_defaults(
+        &fallback_dir,
+        &fallback_log,
+        default_effective_log_file,
+    )
+}
+
+fn prompt_workspace_settings_for_existing(
+    current: &WorkspaceConfig,
+    default_effective_log_file: &str,
+) -> Result<(String, Option<String>)> {
+    prompt_workspace_settings_with_defaults(
+        &current.dir,
+        current.log_file.as_deref().unwrap_or(""),
+        default_effective_log_file,
+    )
+}
+
+fn prompt_workspace_settings_with_defaults(
+    default_dir: &str,
+    default_log_file: &str,
+    default_effective_log_file: &str,
+) -> Result<(String, Option<String>)> {
+    use dialoguer::Input;
+
+    let dir: String = Input::new()
+        .with_prompt("Directory to scan")
+        .default(default_dir.to_string())
+        .interact_text()?;
+    let log_file: String = Input::new()
+        .with_prompt(format!(
+            "Log file (blank/default uses {default_effective_log_file})"
+        ))
+        .default(default_log_file.to_string())
+        .allow_empty(true)
+        .interact_text()?;
+    let log_file = if log_file.trim().is_empty() || log_file.trim().eq_ignore_ascii_case("default")
+    {
+        None
+    } else {
+        Some(log_file)
+    };
+
+    Ok((dir, log_file))
+}
+
+fn print_registered_workspaces(config: &RuntimeConfigFile) {
+    println!("Registered workspaces:");
+    if config.workspaces.is_empty() {
+        println!("  (none)");
+        return;
+    }
+
+    for workspace in &config.workspaces {
+        println!("  {}", workspace.name);
+        println!("    Dir: {}", workspace.dir);
+        println!("    Log: {}", workspace_log_display(workspace, config));
+    }
+}
+
+fn workspace_log_display(workspace: &WorkspaceConfig, config: &RuntimeConfigFile) -> String {
+    workspace.log_file.clone().unwrap_or_else(|| {
+        format!(
+            "(global default: {})",
+            config.log_file.clone().unwrap_or_else(default_log_file)
+        )
+    })
+}
+
+fn default_new_workspace_name(config: &RuntimeConfigFile) -> String {
+    if !config
+        .workspaces
+        .iter()
+        .any(|workspace| workspace.name == "default")
+    {
+        return "default".to_string();
+    }
+
+    let mut index = 2;
+    loop {
+        let name = format!("workspace-{index}");
+        if !config
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.name == name)
+        {
+            return name;
+        }
+        index += 1;
+    }
+}
+
+fn print_workspace_summary(
+    name: &str,
+    dir: &str,
+    log_file: Option<&str>,
+    default_effective_log_file: &str,
+) {
+    println!();
+    println!("  {}", style("Summary:").bold());
+    println!("  Workspace: {}", style(name).cyan());
+    println!("  Directory: {}", style(dir).cyan());
+    println!(
+        "  Log file:  {}",
+        log_file
+            .map(|log_file| log_file.to_string())
+            .unwrap_or_else(|| format!("(global default: {default_effective_log_file})"))
+    );
+    println!();
+}
+
+fn ensure_valid_daily_time(hour: u8, minute: u8) -> Result<()> {
+    if hour >= 24 {
+        bail!("Hour must be between 0 and 23");
+    }
+    if minute >= 60 {
+        bail!("Minute must be between 0 and 59");
+    }
+    Ok(())
+}
+
+fn install_schedule(
+    cli: &Cli,
+    schedule_name: &str,
+    hour: u8,
+    minute: u8,
+    raw_args: &[OsString],
+) -> Result<()> {
+    ensure_valid_daily_time(hour, minute)?;
+    scheduler::validate_schedule_name(schedule_name)?;
+
+    let dir_explicit = has_cli_option(raw_args, Some("-d"), "--dir");
+    let log_explicit = has_cli_option(raw_args, None, "--log-file");
+    if cli.workspace.is_some() && (dir_explicit || log_explicit) {
+        bail!("Use either --workspace or --dir/--log-file when installing a schedule, not both");
+    }
+
+    let mut config = load_runtime_config()?;
+    let workspace_name = if let Some(workspace_name) = cli.workspace.as_deref() {
+        validate_registration_name("workspace", workspace_name)?;
+        if config.find_workspace(workspace_name).is_none() {
+            bail!("Workspace not found: {workspace_name}");
+        }
+        workspace_name.to_string()
+    } else {
+        let workspace_name = "default".to_string();
+        config.upsert_workspace(WorkspaceConfig {
+            name: workspace_name.clone(),
+            dir: cli.dir.clone(),
+            log_file: Some(cli.log_file.clone()),
+        });
+        workspace_name
+    };
+
+    scheduler::install_workspace(schedule_name, &workspace_name, hour, minute)?;
+    config.upsert_schedule(ScheduleConfig {
+        name: schedule_name.to_string(),
+        workspace: workspace_name.clone(),
+        hour,
+        minute,
+    });
+    save_runtime_config(&config)?;
+
+    println!("  Schedule:  {schedule_name}");
+    println!("  Workspace: {workspace_name}");
+    println!("  Config:    {}", runtime_config_path()?.display());
+    Ok(())
+}
+
+fn uninstall_schedule(name: &str, all: bool) -> Result<()> {
+    let mut config = load_runtime_config()?;
+
+    if all {
+        let mut names: Vec<String> = config
+            .schedules
+            .iter()
+            .map(|schedule| schedule.name.clone())
+            .collect();
+        if !names.iter().any(|name| name == "default") {
+            names.push("default".to_string());
+        }
+        names.sort();
+        names.dedup();
+
+        for schedule_name in &names {
+            scheduler::uninstall(schedule_name)?;
+        }
+        config.schedules.clear();
+        save_runtime_config(&config)?;
+        println!("Removed all registered schedules.");
+        return Ok(());
+    }
+
+    scheduler::validate_schedule_name(name)?;
+    scheduler::uninstall(name)?;
+    config.remove_schedule(name);
+    save_runtime_config(&config)?;
+    println!("Removed schedule metadata: {name}");
+    Ok(())
+}
+
+fn list_schedules() -> Result<()> {
+    let config = load_runtime_config()?;
+    print_registered_schedules(&config);
+    println!();
+    scheduler::print_config(&configured_schedule_names(&config))
+}
+
+fn interactive_schedule_wizard(cli: &Cli) -> Result<()> {
+    use dialoguer::Select;
+
+    let mut config = load_runtime_config()?;
+    println!();
+    println!("  {}", style("worktree-gc scheduler").bold());
+    println!("  {}", style("Manage automatic cleanup schedules").dim());
+    println!();
+    print_registered_schedules(&config);
+    println!();
+    print_registered_workspaces(&config);
+    println!();
+
+    let choices = vec![
+        "Add schedule",
+        "Update schedule",
+        "Remove schedule",
+        "Show scheduler status",
+        "Cancel",
+    ];
+    let default_choice = if config.schedules.is_empty() { 0 } else { 1 };
+    let selection = Select::new()
+        .with_prompt("What would you like to do?")
+        .items(&choices)
+        .default(default_choice)
+        .interact()?;
+
+    match selection {
+        0 => add_schedule_interactive(cli, &mut config),
+        1 => update_schedule_interactive(cli, &mut config),
+        2 => remove_schedule_interactive(&mut config),
+        3 => scheduler::print_config(&configured_schedule_names(&config)),
+        _ => {
+            println!("Cancelled.");
+            Ok(())
+        }
+    }
+}
+
+fn add_schedule_interactive(cli: &Cli, config: &mut RuntimeConfigFile) -> Result<()> {
+    use dialoguer::{Confirm, Input};
+
+    let name: String = Input::new()
+        .with_prompt("Schedule name")
+        .default(default_new_schedule_name(config))
+        .validate_with(|input: &String| -> std::result::Result<(), String> {
+            scheduler::validate_schedule_name(input).map_err(|err| err.to_string())?;
+            Ok(())
+        })
+        .interact_text()?;
+
+    if config
+        .schedules
+        .iter()
+        .any(|schedule| schedule.name == name)
+    {
+        bail!("Schedule already exists: {name}");
+    }
+
+    let workspace = prompt_workspace_choice(cli, config, None)?;
+    let (hour, minute) = prompt_schedule_time("09:00")?;
+    print_schedule_summary(&name, &workspace, hour, minute);
+
+    if !Confirm::new()
+        .with_prompt("Install this schedule?")
+        .default(true)
+        .interact()?
+    {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    install_schedule_from_parts(config, &name, &workspace, hour, minute)
+}
+
+fn update_schedule_interactive(cli: &Cli, config: &mut RuntimeConfigFile) -> Result<()> {
+    use dialoguer::{Confirm, Select};
+
+    if config.schedules.is_empty() {
+        println!("No registered schedules to update.");
+        return add_schedule_interactive(cli, config);
+    }
+
+    let schedule_labels: Vec<String> = config
+        .schedules
+        .iter()
+        .map(|schedule| {
+            format!(
+                "{} ({}, {:02}:{:02})",
+                schedule.name, schedule.workspace, schedule.hour, schedule.minute
+            )
+        })
+        .collect();
+    let selection = Select::new()
+        .with_prompt("Select a schedule to update")
+        .items(&schedule_labels)
+        .default(0)
+        .interact()?;
+    let current = config.schedules[selection].clone();
+
+    let workspace = prompt_workspace_choice(cli, config, Some(&current.workspace))?;
+    let (hour, minute) =
+        prompt_schedule_time(&format!("{:02}:{:02}", current.hour, current.minute))?;
+    print_schedule_summary(&current.name, &workspace, hour, minute);
+
+    if !Confirm::new()
+        .with_prompt("Update this schedule?")
+        .default(true)
+        .interact()?
+    {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    install_schedule_from_parts(config, &current.name, &workspace, hour, minute)
+}
+
+fn remove_schedule_interactive(config: &mut RuntimeConfigFile) -> Result<()> {
+    use dialoguer::{Confirm, Select};
+
+    if config.schedules.is_empty() {
+        println!("No registered schedules to remove.");
+        return Ok(());
+    }
+
+    let schedule_labels: Vec<String> = config
+        .schedules
+        .iter()
+        .map(|schedule| {
+            format!(
+                "{} ({}, {:02}:{:02})",
+                schedule.name, schedule.workspace, schedule.hour, schedule.minute
+            )
+        })
+        .collect();
+    let selection = Select::new()
+        .with_prompt("Select a schedule to remove")
+        .items(&schedule_labels)
+        .default(0)
+        .interact()?;
+    let schedule_name = config.schedules[selection].name.clone();
+
+    if !Confirm::new()
+        .with_prompt(format!("Remove schedule '{schedule_name}'?"))
+        .default(false)
+        .interact()?
+    {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    scheduler::uninstall(&schedule_name)?;
+    config.remove_schedule(&schedule_name);
+    save_runtime_config(config)?;
+    println!("Removed schedule metadata: {schedule_name}");
+    Ok(())
+}
+
+fn install_schedule_from_parts(
+    config: &mut RuntimeConfigFile,
+    name: &str,
+    workspace: &str,
+    hour: u8,
+    minute: u8,
+) -> Result<()> {
+    scheduler::install_workspace(name, workspace, hour, minute)?;
+    config.upsert_schedule(ScheduleConfig {
+        name: name.to_string(),
+        workspace: workspace.to_string(),
+        hour,
+        minute,
+    });
+    save_runtime_config(config)?;
+
+    println!("  Schedule:  {name}");
+    println!("  Workspace: {workspace}");
+    println!("  Config:    {}", runtime_config_path()?.display());
+    Ok(())
+}
+
+fn prompt_workspace_choice(
+    cli: &Cli,
+    config: &mut RuntimeConfigFile,
+    current_workspace: Option<&str>,
+) -> Result<String> {
+    use dialoguer::Select;
+
+    let mut workspace_names: Vec<String> = config
+        .workspaces
+        .iter()
+        .map(|workspace| workspace.name.clone())
+        .collect();
+    if let Some(current) = current_workspace {
+        if !workspace_names.iter().any(|name| name == current) {
+            workspace_names.push(current.to_string());
+        }
+    }
+    workspace_names.sort();
+    workspace_names.dedup();
+
+    let current_index = current_workspace
+        .and_then(|current| workspace_names.iter().position(|name| name == current))
+        .unwrap_or(0);
+
+    if workspace_names.is_empty() {
+        config.upsert_workspace(WorkspaceConfig {
+            name: "default".to_string(),
+            dir: cli.dir.clone(),
+            log_file: Some(cli.log_file.clone()),
+        });
+        return Ok("default".to_string());
+    }
+
+    let mut choices = workspace_names.clone();
+    choices.push("Use current --dir as default workspace".to_string());
+    let selection = Select::new()
+        .with_prompt("Workspace")
+        .items(&choices)
+        .default(current_index)
+        .interact()?;
+
+    if selection < workspace_names.len() {
+        return Ok(workspace_names[selection].clone());
+    }
+
+    config.upsert_workspace(WorkspaceConfig {
+        name: "default".to_string(),
+        dir: cli.dir.clone(),
+        log_file: Some(cli.log_file.clone()),
+    });
+    Ok("default".to_string())
+}
+
+fn prompt_schedule_time(default_time: &str) -> Result<(u8, u8)> {
+    use dialoguer::Input;
+
+    let time: String = Input::new()
+        .with_prompt("Run time (HH:MM)")
+        .default(default_time.to_string())
+        .validate_with(|input: &String| -> std::result::Result<(), &str> {
+            if parse_daily_time(input).is_some() {
+                Ok(())
+            } else {
+                Err("Must be in HH:MM format, for example 09:00 or 18:30")
+            }
+        })
+        .interact_text()?;
+
+    Ok(parse_daily_time(&time).expect("validated daily time"))
+}
+
+fn parse_daily_time(input: &str) -> Option<(u8, u8)> {
+    let (hour, minute) = input.split_once(':')?;
+    if hour.len() != 2 || minute.len() != 2 {
+        return None;
+    }
+
+    let hour = hour.parse::<u8>().ok()?;
+    let minute = minute.parse::<u8>().ok()?;
+
+    if hour < 24 && minute < 60 {
+        Some((hour, minute))
+    } else {
+        None
+    }
+}
+
+fn default_new_schedule_name(config: &RuntimeConfigFile) -> String {
+    if !config
+        .schedules
+        .iter()
+        .any(|schedule| schedule.name == "default")
+    {
+        return "default".to_string();
+    }
+
+    let mut index = 2;
+    loop {
+        let name = format!("schedule-{index}");
+        if !config
+            .schedules
+            .iter()
+            .any(|schedule| schedule.name == name)
+        {
+            return name;
+        }
+        index += 1;
+    }
+}
+
+fn print_schedule_summary(name: &str, workspace: &str, hour: u8, minute: u8) {
+    println!();
+    println!("  {}", style("Summary:").bold());
+    println!("  Schedule:  {}", style(name).cyan());
+    println!("  Workspace: {}", style(workspace).cyan());
+    println!(
+        "  Run daily: {}",
+        style(format!("{hour:02}:{minute:02}")).cyan()
+    );
+    println!();
+}
+
+fn print_registered_schedules(config: &RuntimeConfigFile) {
+    println!("Registered schedules:");
+    if config.schedules.is_empty() {
+        println!("  (none)");
+        return;
+    }
+
+    for schedule in &config.schedules {
+        println!("  {}", schedule.name);
+        println!("    Workspace: {}", schedule.workspace);
+        println!(
+            "    Time:      {:02}:{:02} daily",
+            schedule.hour, schedule.minute
+        );
+    }
+}
+
+fn configured_schedule_names(config: &RuntimeConfigFile) -> Vec<String> {
+    config
+        .schedules
+        .iter()
+        .map(|schedule| schedule.name.clone())
+        .collect()
 }
 
 fn show_history(
@@ -1233,6 +2218,7 @@ branch refs/heads/feat";
             dry_run: false,
             verbose: false,
             log_file: "/tmp/does-not-exist.jsonl".to_string(),
+            workspace: None,
         };
 
         let result = execute_command(
@@ -1299,6 +2285,156 @@ branch refs/heads/feat";
             Some("-d"),
             "--dir"
         ));
+    }
+
+    #[test]
+    fn test_runtime_config_deserializes_legacy_fields() {
+        let config: RuntimeConfigFile =
+            serde_json::from_str(r#"{"dir":"/repos","log_file":"/tmp/gc.jsonl"}"#).unwrap();
+
+        assert_eq!(config.dir.as_deref(), Some("/repos"));
+        assert_eq!(config.log_file.as_deref(), Some("/tmp/gc.jsonl"));
+        assert!(config.workspaces.is_empty());
+        assert!(config.schedules.is_empty());
+    }
+
+    #[test]
+    fn test_apply_runtime_config_uses_workspace_before_legacy_defaults() {
+        let mut cli = Cli {
+            command: None,
+            dir: "/builtin".to_string(),
+            dry_run: false,
+            verbose: false,
+            log_file: "/builtin/gc.jsonl".to_string(),
+            workspace: Some("team".to_string()),
+        };
+        let config = RuntimeConfigFile {
+            dir: Some("/legacy".to_string()),
+            log_file: Some("/legacy/gc.jsonl".to_string()),
+            workspaces: vec![WorkspaceConfig {
+                name: "team".to_string(),
+                dir: "/workspaces/team".to_string(),
+                log_file: Some("/workspaces/team/gc.jsonl".to_string()),
+            }],
+            schedules: Vec::new(),
+        };
+
+        apply_runtime_config_values(
+            &mut cli,
+            &[
+                OsString::from("worktree-gc"),
+                OsString::from("run"),
+                OsString::from("--workspace"),
+                OsString::from("team"),
+            ],
+            &config,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(cli.dir, "/workspaces/team");
+        assert_eq!(cli.log_file, "/workspaces/team/gc.jsonl");
+    }
+
+    #[test]
+    fn test_apply_runtime_config_cli_dir_overrides_workspace_dir() {
+        let mut cli = Cli {
+            command: None,
+            dir: "/override".to_string(),
+            dry_run: false,
+            verbose: false,
+            log_file: "/builtin/gc.jsonl".to_string(),
+            workspace: Some("team".to_string()),
+        };
+        let config = RuntimeConfigFile {
+            dir: Some("/legacy".to_string()),
+            log_file: Some("/legacy/gc.jsonl".to_string()),
+            workspaces: vec![WorkspaceConfig {
+                name: "team".to_string(),
+                dir: "/workspaces/team".to_string(),
+                log_file: Some("/workspaces/team/gc.jsonl".to_string()),
+            }],
+            schedules: Vec::new(),
+        };
+
+        apply_runtime_config_values(
+            &mut cli,
+            &[
+                OsString::from("worktree-gc"),
+                OsString::from("run"),
+                OsString::from("--workspace"),
+                OsString::from("team"),
+                OsString::from("--dir"),
+                OsString::from("/override"),
+            ],
+            &config,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(cli.dir, "/override");
+        assert_eq!(cli.log_file, "/workspaces/team/gc.jsonl");
+    }
+
+    #[test]
+    fn test_validate_registration_name() {
+        assert!(validate_registration_name("workspace", "team-a_1").is_ok());
+        assert!(validate_registration_name("workspace", "Team").is_err());
+        assert!(validate_registration_name("workspace", "../team").is_err());
+        assert!(validate_registration_name("workspace", "").is_err());
+    }
+
+    #[test]
+    fn test_parse_daily_time() {
+        assert_eq!(parse_daily_time("09:00"), Some((9, 0)));
+        assert_eq!(parse_daily_time("18:30"), Some((18, 30)));
+        assert_eq!(parse_daily_time("24:00"), None);
+        assert_eq!(parse_daily_time("09:60"), None);
+        assert_eq!(parse_daily_time("9:00"), None);
+    }
+
+    #[test]
+    fn test_default_new_schedule_name() {
+        let mut config = RuntimeConfigFile::default();
+        assert_eq!(default_new_schedule_name(&config), "default");
+
+        config.schedules.push(ScheduleConfig {
+            name: "default".to_string(),
+            workspace: "personal".to_string(),
+            hour: 9,
+            minute: 0,
+        });
+        assert_eq!(default_new_schedule_name(&config), "schedule-2");
+
+        config.schedules.push(ScheduleConfig {
+            name: "schedule-2".to_string(),
+            workspace: "work".to_string(),
+            hour: 18,
+            minute: 30,
+        });
+        assert_eq!(default_new_schedule_name(&config), "schedule-3");
+    }
+
+    #[test]
+    fn test_default_new_workspace_name() {
+        let mut config = RuntimeConfigFile::default();
+        assert_eq!(default_new_workspace_name(&config), "default");
+
+        config.workspaces.push(WorkspaceConfig {
+            name: "default".to_string(),
+            dir: "/repos/default".to_string(),
+            log_file: None,
+        });
+        assert_eq!(default_new_workspace_name(&config), "workspace-2");
+
+        config.workspaces.push(WorkspaceConfig {
+            name: "workspace-2".to_string(),
+            dir: "/repos/second".to_string(),
+            log_file: None,
+        });
+        assert_eq!(default_new_workspace_name(&config), "workspace-3");
     }
 
     #[test]
