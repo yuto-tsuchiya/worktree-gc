@@ -462,4 +462,40 @@ mod tests {
         });
         assert_eq!(default_new_workspace_name(&config), "workspace-3");
     }
+
+    #[test]
+    fn test_workspace_log_display_uses_global_default_when_workspace_log_is_absent() {
+        let config = RuntimeConfigFile {
+            log_file: Some("/global/gc.jsonl".to_string()),
+            workspaces: vec![WorkspaceConfig {
+                name: "team".to_string(),
+                dir: "/repos/team".to_string(),
+                log_file: None,
+            }],
+            ..RuntimeConfigFile::default()
+        };
+
+        assert_eq!(
+            workspace_log_display(&config.workspaces[0], &config),
+            "(global default: /global/gc.jsonl)"
+        );
+    }
+
+    #[test]
+    fn test_workspace_log_display_prefers_workspace_log() {
+        let config = RuntimeConfigFile {
+            log_file: Some("/global/gc.jsonl".to_string()),
+            workspaces: vec![WorkspaceConfig {
+                name: "team".to_string(),
+                dir: "/repos/team".to_string(),
+                log_file: Some("/team/gc.jsonl".to_string()),
+            }],
+            ..RuntimeConfigFile::default()
+        };
+
+        assert_eq!(
+            workspace_log_display(&config.workspaces[0], &config),
+            "/team/gc.jsonl"
+        );
+    }
 }

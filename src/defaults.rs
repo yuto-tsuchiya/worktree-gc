@@ -48,8 +48,11 @@ mod tests {
     #[test]
     fn test_validate_registration_name() {
         assert!(validate_registration_name("workspace", "team-a_1").is_ok());
+        assert!(validate_registration_name("workspace", "1team").is_ok());
         assert!(validate_registration_name("workspace", "Team").is_err());
         assert!(validate_registration_name("workspace", "../team").is_err());
         assert!(validate_registration_name("workspace", "").is_err());
+        assert!(validate_registration_name("workspace", "team.a").is_err());
+        assert!(validate_registration_name("workspace", &"a".repeat(32)).is_err());
     }
 }

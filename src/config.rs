@@ -130,4 +130,114 @@ mod tests {
         assert!(config.workspaces.is_empty());
         assert!(config.schedules.is_empty());
     }
+
+    #[test]
+    fn test_upsert_workspace_sorts_and_replaces_by_name() {
+        let mut config = RuntimeConfigFile::default();
+
+        config.upsert_workspace(WorkspaceConfig {
+            name: "zeta".to_string(),
+            dir: "/repos/zeta".to_string(),
+            log_file: None,
+        });
+        config.upsert_workspace(WorkspaceConfig {
+            name: "alpha".to_string(),
+            dir: "/repos/alpha".to_string(),
+            log_file: Some("/logs/alpha.jsonl".to_string()),
+        });
+        config.upsert_workspace(WorkspaceConfig {
+            name: "zeta".to_string(),
+            dir: "/repos/zeta-new".to_string(),
+            log_file: Some("/logs/zeta.jsonl".to_string()),
+        });
+
+        assert_eq!(
+            config
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "zeta"]
+        );
+        assert_eq!(
+            config
+                .find_workspace("zeta")
+                .map(|workspace| (workspace.dir.as_str(), workspace.log_file.as_deref())),
+            Some(("/repos/zeta-new", Some("/logs/zeta.jsonl")))
+        );
+    }
+
+    #[test]
+    fn test_remove_workspace_reports_whether_entry_existed() {
+        let mut config = RuntimeConfigFile {
+            workspaces: vec![WorkspaceConfig {
+                name: "team".to_string(),
+                dir: "/repos/team".to_string(),
+                log_file: None,
+            }],
+            ..RuntimeConfigFile::default()
+        };
+
+        assert!(config.remove_workspace("team"));
+        assert!(!config.remove_workspace("team"));
+        assert!(config.workspaces.is_empty());
+    }
+
+    #[test]
+    fn test_upsert_schedule_sorts_and_replaces_by_name() {
+        let mut config = RuntimeConfigFile::default();
+
+        config.upsert_schedule(ScheduleConfig {
+            name: "nightly".to_string(),
+            workspace: "team".to_string(),
+            hour: 23,
+            minute: 30,
+        });
+        config.upsert_schedule(ScheduleConfig {
+            name: "daily".to_string(),
+            workspace: "personal".to_string(),
+            hour: 9,
+            minute: 0,
+        });
+        config.upsert_schedule(ScheduleConfig {
+            name: "nightly".to_string(),
+            workspace: "team".to_string(),
+            hour: 1,
+            minute: 15,
+        });
+
+        assert_eq!(
+            config
+                .schedules
+                .iter()
+                .map(|schedule| schedule.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["daily", "nightly"]
+        );
+        assert_eq!(
+            config
+                .schedules
+                .iter()
+                .find(|schedule| schedule.name == "nightly")
+                .map(|schedule| (schedule.hour, schedule.minute)),
+            Some((1, 15))
+        );
+    }
+
+    #[test]
+    fn test_remove_schedule_reports_whether_entry_existed() {
+        let mut config = RuntimeConfigFile {
+            schedules: vec![ScheduleConfig {
+                name: "default".to_string(),
+                workspace: "team".to_string(),
+                hour: 9,
+                minute: 0,
+            }],
+            ..RuntimeConfigFile::default()
+        };
+
+        assert!(config.remove_schedule("default"));
+        assert!(!config.remove_schedule("default"));
+        assert!(config.schedules.is_empty());
+    }
 }

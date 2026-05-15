@@ -408,6 +408,13 @@ mod tests {
     }
 
     #[test]
+    fn test_ensure_valid_daily_time_rejects_out_of_range_values() {
+        assert!(ensure_valid_daily_time(23, 59).is_ok());
+        assert!(ensure_valid_daily_time(24, 0).is_err());
+        assert!(ensure_valid_daily_time(9, 60).is_err());
+    }
+
+    #[test]
     fn test_default_new_schedule_name() {
         let mut config = RuntimeConfigFile::default();
         assert_eq!(default_new_schedule_name(&config), "default");
@@ -427,5 +434,28 @@ mod tests {
             minute: 30,
         });
         assert_eq!(default_new_schedule_name(&config), "schedule-3");
+    }
+
+    #[test]
+    fn test_configured_names_preserves_config_order() {
+        let config = RuntimeConfigFile {
+            schedules: vec![
+                ScheduleConfig {
+                    name: "default".to_string(),
+                    workspace: "personal".to_string(),
+                    hour: 9,
+                    minute: 0,
+                },
+                ScheduleConfig {
+                    name: "nightly".to_string(),
+                    workspace: "work".to_string(),
+                    hour: 23,
+                    minute: 30,
+                },
+            ],
+            ..RuntimeConfigFile::default()
+        };
+
+        assert_eq!(configured_names(&config), vec!["default", "nightly"]);
     }
 }

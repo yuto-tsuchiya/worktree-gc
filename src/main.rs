@@ -611,6 +611,107 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_runtime_config_uses_global_log_when_workspace_log_is_default() {
+        let mut cli = Cli {
+            command: None,
+            dir: "/builtin".to_string(),
+            dry_run: false,
+            verbose: false,
+            log_file: "/builtin/gc.jsonl".to_string(),
+            workspace: Some("team".to_string()),
+        };
+        let config = RuntimeConfigFile {
+            dir: Some("/legacy".to_string()),
+            log_file: Some("/global/gc.jsonl".to_string()),
+            workspaces: vec![WorkspaceConfig {
+                name: "team".to_string(),
+                dir: "/workspaces/team".to_string(),
+                log_file: None,
+            }],
+            schedules: Vec::new(),
+        };
+
+        apply_runtime_config_values(
+            &mut cli,
+            &[
+                OsString::from("worktree-gc"),
+                OsString::from("--workspace=team"),
+            ],
+            &config,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(cli.dir, "/workspaces/team");
+        assert_eq!(cli.log_file, "/global/gc.jsonl");
+    }
+
+    #[test]
+    fn test_apply_runtime_config_explicit_log_overrides_workspace_log() {
+        let mut cli = Cli {
+            command: None,
+            dir: "/builtin".to_string(),
+            dry_run: false,
+            verbose: false,
+            log_file: "/explicit/gc.jsonl".to_string(),
+            workspace: Some("team".to_string()),
+        };
+        let config = RuntimeConfigFile {
+            dir: Some("/legacy".to_string()),
+            log_file: Some("/global/gc.jsonl".to_string()),
+            workspaces: vec![WorkspaceConfig {
+                name: "team".to_string(),
+                dir: "/workspaces/team".to_string(),
+                log_file: Some("/workspaces/team/gc.jsonl".to_string()),
+            }],
+            schedules: Vec::new(),
+        };
+
+        apply_runtime_config_values(
+            &mut cli,
+            &[
+                OsString::from("worktree-gc"),
+                OsString::from("--workspace"),
+                OsString::from("team"),
+                OsString::from("--log-file=/explicit/gc.jsonl"),
+            ],
+            &config,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(cli.dir, "/workspaces/team");
+        assert_eq!(cli.log_file, "/explicit/gc.jsonl");
+    }
+
+    #[test]
+    fn test_apply_runtime_config_rejects_unknown_workspace() {
+        let mut cli = Cli {
+            command: None,
+            dir: "/builtin".to_string(),
+            dry_run: false,
+            verbose: false,
+            log_file: "/builtin/gc.jsonl".to_string(),
+            workspace: Some("missing".to_string()),
+        };
+
+        let result = apply_runtime_config_values(
+            &mut cli,
+            &[
+                OsString::from("worktree-gc"),
+                OsString::from("--workspace=missing"),
+            ],
+            &RuntimeConfigFile::default(),
+            false,
+            false,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_validate_registration_name() {
         assert!(validate_registration_name("workspace", "team-a_1").is_ok());
         assert!(validate_registration_name("workspace", "Team").is_err());

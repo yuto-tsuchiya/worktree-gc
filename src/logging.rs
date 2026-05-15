@@ -100,3 +100,75 @@ pub(crate) fn setup_logging(verbose: bool) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_log_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "worktree-gc-{name}-{}-{}.jsonl",
+            std::process::id(),
+            chrono::Local::now()
+                .timestamp_nanos_opt()
+                .unwrap_or_default()
+        ))
+    }
+
+    #[test]
+    fn test_error_record_omits_absent_optional_fields() {
+        let record = LogRecord::Error {
+            timestamp: "2026-05-15T00:00:00+09:00".to_string(),
+            repo: "owner/repo".to_string(),
+            branch: None,
+            worktree: None,
+            error: "boom".to_string(),
+        };
+
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&record).unwrap()).unwrap();
+
+        assert_eq!(value["action"], "error");
+        assert_eq!(value["repo"], "owner/repo");
+        assert!(value.get("branch").is_none());
+        assert!(value.get("worktree").is_none());
+    }
+
+    #[test]
+    fn test_json_logger_appends_json_lines() {
+        let path = temp_log_path("append");
+        let logger = JsonLogger::new(Some(&path.to_string_lossy())).unwrap();
+
+        logger.write(&LogRecord::Summary {
+            timestamp: "2026-05-15T00:00:00+09:00".to_string(),
+            scanned_repos: 2,
+            scanned_worktrees: 3,
+            removed_count: 1,
+            skipped_count: 1,
+            error_count: 0,
+            dry_run: true,
+        });
+        logger.write(&LogRecord::Skipped {
+            timestamp: "2026-05-15T00:01:00+09:00".to_string(),
+            repo: "owner/repo".to_string(),
+            branch: "feature".to_string(),
+            worktree: "/repos/repo-feature".to_string(),
+            reason: "not_merged".to_string(),
+        });
+
+        drop(logger);
+        let content = fs::read_to_string(&path).unwrap();
+        let lines = content.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(lines[0]).unwrap()["action"],
+            "summary"
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(lines[1]).unwrap()["action"],
+            "skipped"
+        );
+
+        let _ = fs::remove_file(path);
+    }
+}
