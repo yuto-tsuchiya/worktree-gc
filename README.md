@@ -1,10 +1,3 @@
----
-session_id: fcdf7951-07f3-4f37-93d0-f38afac03cd0
-date: 2026-05-15
-topic: worktree-gc multi workspace and schedule registration
-resume: "copilot cli で `/resume fcdf7951-07f3-4f37-93d0-f38afac03cd0` を実行"
----
-
 # worktree-gc
 
 Automatically clean up git worktrees whose pull requests have been merged.
